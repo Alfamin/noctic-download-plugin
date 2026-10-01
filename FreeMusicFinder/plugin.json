@@ -1,0 +1,17 @@
+{
+  "id": "dev.moshi.freemusicfinder",
+  "name": "Free Music Finder",
+  "version": "2.0.0",
+  "author": "moshi",
+  "description": "Search the Telegram music bot @MusicsHuntersbot through your own Telegram account and download tracks into your library. The bot is a third party and is not limited to freely licensed music; what you download through it is your responsibility.",
+  "type": "dotnet",
+  "entry": "FreeMusicFinder.dll",
+  "apiVersion": "1.1",
+  "minAppVersion": "1.5.3",
+  "platforms": ["windows", "macos", "linux"],
+  "permissions": ["menu.commands", "notifications", "network"],
+  "settings": [
+    { "key": "openSearch", "label": "Open the search window", "description": "Flip this switch (either way) to open the search window. You can also right-click any track → \"Find free music…\".", "type": "bool", "default": false },
+    { "key": "downloadFolder", "label": "Download folder", "description": "Leave empty to save into \"Noctis Free Music\" inside your first Noctis library folder, so downloads appear in the library right away (needs Watch Folders on). If you set a folder outside the library, add it to your Noctis library folders.", "type": "string", "default": "" }
+  ]
+}
