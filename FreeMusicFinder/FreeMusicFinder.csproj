@@ -6,17 +6,19 @@
     Settings → Plugins → "Install from file…".
 
     Noctis.Plugins.Abstractions is not on NuGet yet, so this builds against a checkout of the
-    Noctis repo (build.ps1 clones it into ../extern/Noctis). Override with -p:NoctisRepo=<path>.
+    Noctis repo: the release named by "minAppVersion" in plugin.json, which build.ps1 clones
+    (see ../Plugin.props for why that release). Override with -p:NoctisRepo=<path>.
   -->
+  <Import Project="..\Plugin.props" />
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>FreeMusicFinder</RootNamespace>
     <AssemblyName>FreeMusicFinder</AssemblyName>
-    <Version>2.0.0</Version>
+    <!-- Written once, in plugin.json. -->
+    <Version>$(PluginVersion)</Version>
     <EnableDynamicLoading>true</EnableDynamicLoading>
-    <NoctisRepo Condition="'$(NoctisRepo)' == ''">$(MSBuildThisFileDirectory)..\extern\Noctis</NoctisRepo>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="$(NoctisRepo)\src\Noctis.Plugins.Abstractions\Noctis.Plugins.Abstractions.csproj">
@@ -27,5 +29,12 @@
   <ItemGroup>
     <PackageReference Include="WTelegramClient" Version="4.4.9" />
   </ItemGroup>
-  <Import Project="$(NoctisRepo)\samples\PluginPackage.targets" />
+  <ItemGroup>
+    <InternalsVisibleTo Include="FreeMusicFinder.Tests" />
+  </ItemGroup>
+  <Target Name="CheckPluginJson" BeforeTargets="Build">
+    <Error Condition="'$(PluginVersion)' == '' Or '$(PluginMinAppVersion)' == ''" Text="plugin.json needs a &quot;version&quot; and a &quot;minAppVersion&quot;." />
+    <Error Condition="!Exists('$(NoctisRepo)\src\Noctis.Plugins.Abstractions\Noctis.Plugins.Abstractions.csproj')" Text="The Noctis source is not at $(NoctisRepo). Run build.ps1, which fetches it." />
+  </Target>
+  <Import Project="$(NoctisRepo)\samples\PluginPackage.targets" Condition="Exists('$(NoctisRepo)\samples\PluginPackage.targets')" />
 </Project>

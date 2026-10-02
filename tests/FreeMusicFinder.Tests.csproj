@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Tests for the plugin that need neither Telegram nor a screen. build.ps1 runs them; by hand:
+    dotnet run with this project. The windows are opened on Avalonia's headless platform.
+  -->
+  <Import Project="..\Plugin.props" />
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>FreeMusicFinder.Tests</RootNamespace>
+    <AssemblyName>FreeMusicFinder.Tests</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\FreeMusicFinder\FreeMusicFinder.csproj" />
+    <ProjectReference Include="$(NoctisRepo)\src\Noctis.Plugins.Abstractions\Noctis.Plugins.Abstractions.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Not older than the Avalonia the Noctis release in extern/ was built with. -->
+    <PackageReference Include="Avalonia.Headless" Version="12.1.3" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.3" />
+    <!-- Only for the pictures (FMF_PICTURES). -->
+    <PackageReference Include="Avalonia.Skia" Version="12.1.3" />
+    <PackageReference Include="Avalonia.HarfBuzz" Version="12.1.3" />
+  </ItemGroup>
+</Project>

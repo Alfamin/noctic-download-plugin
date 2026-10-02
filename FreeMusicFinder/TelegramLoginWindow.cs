@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net.Sockets;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -160,7 +161,7 @@ internal sealed class TelegramLoginWindow : Window
         catch (Exception ex)
         {
             _host.Log("Telegram login failed: " + ex.Message);
-            if (!_closed) Fail(Explain(ex.Message));
+            if (!_closed) Fail(Explain(ex));
         }
     }
 
@@ -192,6 +193,12 @@ internal sealed class TelegramLoginWindow : Window
         _error.Text = message;
         _error.IsVisible = true;
     }
+
+    private static string Explain(Exception ex) => ex is SocketException or IOException or TimeoutException
+        // Not an answer from Telegram: the connection itself did not work.
+        ? "Telegram could not be reached (" + ex.Message.TrimEnd('.') + "). Where Telegram is blocked, turn on a VPN "
+          + "or set a proxy in the plugin's settings (Settings → Plugins → Free Music Finder)."
+        : Explain(ex.Message);
 
     private static string Explain(string error) => error switch
     {

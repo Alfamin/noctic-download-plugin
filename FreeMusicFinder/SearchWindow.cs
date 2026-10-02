@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Sockets;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -13,19 +14,20 @@ namespace FreeMusicFinder;
 /// The search window. Built in code (no XAML, no bindings) so it depends on nothing but the
 /// Avalonia controls Noctis already ships. Every event handler catches its own exceptions:
 /// one escaping into Noctis would mark the plugin Failed.
+/// The window only shows the downloads; they are run by <see cref="Downloads"/> and go on
+/// when it is closed.
 /// </summary>
 internal sealed class SearchWindow : Window
 {
-    private const int MaxParallelDownloads = 3;
-
     private readonly IPluginHost _host;
     private readonly TelegramAccount _telegram;
-    private readonly TelegramBotSource _bot;
+    private readonly Downloads _downloads;
+    private readonly Func<string, CancellationToken, Task<IReadOnlyList<BotTrack>>> _searchBot;
     private readonly CancellationTokenSource _closed = new();
-    private readonly SemaphoreSlim _downloadSlots = new(MaxParallelDownloads, MaxParallelDownloads);
     private readonly List<Row> _rows = new();
     private CancellationTokenSource? _search;
     private string? _defaultFolder;
+    private bool _noLibrary;
 
     private readonly TextBox _query;
     private readonly Button _searchButton;
@@ -34,11 +36,14 @@ internal sealed class SearchWindow : Window
     private readonly StackPanel _results;
     private readonly TextBlock _status;
 
-    public SearchWindow(IPluginHost host, TelegramAccount telegram)
+    /// <param name="searchBot">Asks the bot for the tracks that match a text.</param>
+    public SearchWindow(IPluginHost host, TelegramAccount telegram, Downloads downloads,
+        Func<string, CancellationToken, Task<IReadOnlyList<BotTrack>>> searchBot)
     {
         _host = host;
         _telegram = telegram;
-        _bot = new TelegramBotSource(telegram);
+        _downloads = downloads;
+        _searchBot = searchBot;
 
         Title = "Free Music Finder";
         Width = 760;
@@ -72,6 +77,11 @@ internal sealed class SearchWindow : Window
             TextTrimming = TextTrimming.CharacterEllipsis,
             Opacity = 0.7,
         };
+        // The line is cut off when it does not fit; pointing at it shows all of it.
+        _status.PropertyChanged += (_, e) =>
+        {
+            if (e.Property == TextBlock.TextProperty) ToolTip.SetTip(_status, string.IsNullOrEmpty(_status.Text) ? null : _status.Text);
+        };
         _telegramButton = new Button { Margin = new Thickness(8, 0, 0, 0) };
         _telegramButton.Click += (_, _) => OpenTelegramLogin();
         _downloadAllButton = new Button { Content = "Download all", IsEnabled = false, Margin = new Thickness(8, 0, 0, 0) };
@@ -101,9 +111,17 @@ internal sealed class SearchWindow : Window
             ? $"Searches the Telegram bot @{TelegramBotSource.Bot} through your Telegram account."
             : LoginFirst;
 
+        // Downloads started before the window was last closed are still going.
+        ShowRunningDownloads();
+        if (_rows.Count > 0) _status.Text = $"{_rows.Count} download{(_rows.Count == 1 ? " is" : "s are")} still going.";
+
+        _downloads.Changed += OnDownloadChanged;
+        _downloads.Finished += OnDownloadsFinished;
         Opened += (_, _) => _query.Focus();
         Closed += (_, _) =>
         {
+            _downloads.Changed -= OnDownloadChanged;
+            _downloads.Finished -= OnDownloadsFinished;
             _closed.Cancel();
             _search?.Cancel();
         };
@@ -133,10 +151,10 @@ internal sealed class SearchWindow : Window
     {
         get
         {
-            var configured = _host.Settings.GetString("downloadFolder")?.Trim();
+            var configured = _host.Settings.GetString(FreeMusicPlugin.DownloadFolderKey)?.Trim();
             return string.IsNullOrEmpty(configured)
                 ? _defaultFolder ??= Downloader.DefaultFolder(_host.DataDirectory)
-                : Environment.ExpandEnvironmentVariables(configured);
+                : Downloader.Folder(configured, _host.DataDirectory);
         }
     }
 
@@ -165,6 +183,7 @@ internal sealed class SearchWindow : Window
             _downloadAllButton.IsEnabled = false;
             if (!_telegram.IsLoggedIn)
             {
+                ShowRunningDownloads();
                 _status.Text = LoginFirst;
                 return;
             }
@@ -174,20 +193,27 @@ internal sealed class SearchWindow : Window
             try
             {
                 // Task.Run keeps the waiting on the bot off the UI thread.
-                var tracks = await Task.Run(() => _bot.SearchAsync(query, ct), ct);
+                var tracks = await Task.Run(() => _searchBot(query, ct), ct);
                 if (search != _search) return; // a newer search took over
                 foreach (var track in tracks) AddRow(track);
-                _status.Text = _rows.Count == 0 ? "Nothing found." : $"{_rows.Count} track{(_rows.Count == 1 ? "" : "s")} found.";
+                var found = _rows.Count;
+                var owned = _rows.Count(r => r.InLibrary);
+                _status.Text = found == 0 ? "Nothing found."
+                    : $"{found} track{(found == 1 ? "" : "s")} found" + (owned > 0 ? $", {owned} already in your library." : ".");
             }
             catch (Exception ex)
             {
                 if (search != _search || _closed.IsCancellationRequested) return;
                 _host.Log("search failed: " + ex.Message);
-                _status.Text = ex is OperationCanceledException ? "The bot did not answer." : "Search failed: " + ex.Message;
+                _status.Text = ex is OperationCanceledException ? "The bot did not answer."
+                    : ex is TimeoutException or BotAnswerException or FormatException ? ex.Message
+                    : ex is SocketException or IOException ? "Telegram could not be reached. Where it is blocked, turn on a VPN or set a proxy in the plugin's settings."
+                    : "Search failed: " + ex.Message;
             }
 
+            ShowRunningDownloads();
             _searchButton.IsEnabled = true;
-            _downloadAllButton.IsEnabled = _rows.Count > 0;
+            ShowDownloadAll();
             ShowTelegramState(); // a search can find out that Telegram ended the session
         }
         catch (Exception ex)
@@ -198,20 +224,35 @@ internal sealed class SearchWindow : Window
         }
     }
 
-    private void AddRow(BotTrack track)
+    /// <summary>Adds a row for every waiting or running download that has none: they stay in view across searches.</summary>
+    private void ShowRunningDownloads()
     {
+        foreach (var download in _downloads.Active)
+            if (_rows.All(r => r.Download != download))
+                AddRow(download.Track, download);
+    }
+
+    private void AddRow(BotTrack track, Download? download = null)
+    {
+        var folder = download?.Folder ?? DownloadFolder;
+        var button = new Button { MinWidth = 110, Margin = new Thickness(12, 0, 0, 0), HorizontalContentAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        var row = new Row(track, button)
+        {
+            Download = download ?? _downloads.Find(track.FileName, folder),
+            OnDisk = Downloader.FindExisting(folder, track.FileName) is not null,
+        };
+        row.InLibrary = !row.OnDisk && row.Download is null && InLibrary(track);
+        row.Show();
+        button.Click += (_, _) => Download(row);
+
         var title = new TextBlock { Text = track.Title, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis };
         var details = track.Artist;
         if (track.Duration is { } d) details += " · " + (d.TotalHours >= 1 ? d.ToString(@"h\:mm\:ss") : d.ToString(@"m\:ss"));
+        if (row.InLibrary) details += " · in your library";
         var subtitle = new TextBlock { Text = details, Opacity = 0.7, FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis };
         var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
         text.Children.Add(title);
         text.Children.Add(subtitle);
-
-        var button = new Button { Content = "Download", MinWidth = 110, Margin = new Thickness(12, 0, 0, 0), HorizontalContentAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-        var row = new Row(track, button);
-        if (Downloader.FindExisting(DownloadFolder, track) is not null) row.MarkDone("Downloaded");
-        button.Click += (_, _) => Download(row, announce: true);
 
         var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(4, 6) };
         grid.Children.Add(text);
@@ -222,21 +263,33 @@ internal sealed class SearchWindow : Window
         _results.Children.Add(grid);
     }
 
-    private async void DownloadAll()
+    /// <summary>
+    /// Whether the Noctis library already has this song, in any of its folders. Needs the
+    /// "library.read" permission; without it (or on a Noctis that has no library search) no
+    /// result is marked.
+    /// </summary>
+    private bool InLibrary(BotTrack track)
+    {
+        if (_noLibrary) return false;
+        try
+        {
+            return _host.Library.Search(BotText.Plain(track.Title), 50)
+                .Any(t => BotText.SameSong(track.Artist, track.Title, track.Duration, t.Artist, t.Title, t.Duration));
+        }
+        catch (Exception ex)
+        {
+            _noLibrary = true;
+            _host.Log("results are not checked against the library: " + ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>Queues every result that is neither saved nor in the library yet.</summary>
+    private void DownloadAll()
     {
         try
         {
-            var todo = _rows.Where(r => r.CanStart).ToList();
-            if (todo.Count == 0) return;
-            _downloadAllButton.IsEnabled = false;
-            var results = await Task.WhenAll(todo.Select(r => DownloadCoreAsync(r)));
-            var saved = results.Count(ok => ok);
-            if (_closed.IsCancellationRequested) return;
-
-            _downloadAllButton.IsEnabled = _rows.Any(r => r.CanStart);
-            var message = $"Saved {saved} of {todo.Count} tracks to {DownloadFolder}";
-            _status.Text = message;
-            Announce(message);
+            foreach (var row in _rows.Where(r => r.CanStart && !r.InLibrary).ToList()) Download(row);
         }
         catch (Exception ex)
         {
@@ -244,16 +297,14 @@ internal sealed class SearchWindow : Window
         }
     }
 
-    private async void Download(Row row, bool announce)
+    private void Download(Row row)
     {
         try
         {
             if (!row.CanStart) return;
-            var ok = await DownloadCoreAsync(row);
-            if (!ok || _closed.IsCancellationRequested) return;
-            var message = $"Saved \"{row.Track.Title}\" to {DownloadFolder}";
-            _status.Text = message;
-            if (announce) Announce(message);
+            row.Download = _downloads.Start(row.Track, DownloadFolder);
+            row.Show();
+            ShowDownloadAll();
         }
         catch (Exception ex)
         {
@@ -261,51 +312,31 @@ internal sealed class SearchWindow : Window
         }
     }
 
-    /// <summary>True when the file is on disk afterwards. Never throws.</summary>
-    private async Task<bool> DownloadCoreAsync(Row row)
-    {
-        var ct = _closed.Token;
-        row.MarkBusy("Queued");
-        try
+    private void ShowDownloadAll() => _downloadAllButton.IsEnabled = _rows.Any(r => r.CanStart && !r.InLibrary);
+
+    // From the download thread.
+    private void OnDownloadChanged(Download download)
+        => Dispatcher.UIThread.Post(() =>
         {
-            await _downloadSlots.WaitAsync(ct);
+            if (_closed.IsCancellationRequested) return;
             try
             {
-                row.MarkBusy("Starting…");
-                // Created on the UI thread, so reports are posted back to it.
-                var progress = new Progress<double>(p => row.MarkBusy($"{p:P0}"));
-                var folder = DownloadFolder;
-                var outcome = await Task.Run(() => Downloader.DownloadAsync(row.Track, folder, progress, ct), ct);
-                // Progress reports are posted; let the queued ones land before the final label.
-                await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
-                row.MarkDone(outcome == DownloadOutcome.Saved ? "Downloaded" : "Already saved");
-                return true;
+                foreach (var row in _rows.Where(r => r.Download == download)) row.Show();
+                if (download.State == DownloadState.Failed) _status.Text = $"Could not download \"{download.Track.Title}\": {download.Error}";
+                if (!download.IsActive) ShowDownloadAll();
             }
-            finally
+            catch (Exception ex)
             {
-                _downloadSlots.Release();
+                _host.Log("could not show a download: " + ex.Message);
             }
-        }
-        catch (OperationCanceledException)
-        {
-            return false;
-        }
-        catch (Exception ex)
-        {
-            _host.Log($"download of \"{row.Track.Title}\" failed: {ex.Message}");
-            row.MarkFailed();
-            ToolTip.SetTip(row.Button, ex.Message);
-            if (!_closed.IsCancellationRequested) _status.Text = $"Could not download \"{row.Track.Title}\": {ex.Message}";
-            return false;
-        }
-    }
+        });
 
-    private void Announce(string message)
-    {
-        // Noctis drops notices sent faster than one a second; that is fine here.
-        try { _host.Notify(message); }
-        catch (Exception ex) { _host.Log("notify failed: " + ex.Message); }
-    }
+    // From the download thread.
+    private void OnDownloadsFinished(string summary)
+        => Dispatcher.UIThread.Post(() =>
+        {
+            if (!_closed.IsCancellationRequested) _status.Text = summary;
+        });
 
     private void OpenFolder()
     {
@@ -324,9 +355,6 @@ internal sealed class SearchWindow : Window
     /// <summary>A result line: the track and the button that doubles as its status.</summary>
     private sealed class Row
     {
-        private bool _busy;
-        private bool _done;
-
         public Row(BotTrack track, Button button)
         {
             Track = track;
@@ -335,29 +363,33 @@ internal sealed class SearchWindow : Window
 
         public BotTrack Track { get; }
         public Button Button { get; }
-        public bool CanStart => !_busy && !_done;
 
-        public void MarkBusy(string label)
-        {
-            if (_done) return;
-            _busy = true;
-            Button.IsEnabled = false;
-            Button.Content = label;
-        }
+        /// <summary>The track's download, once one was asked for.</summary>
+        public Download? Download { get; set; }
 
-        public void MarkDone(string label)
-        {
-            _busy = false;
-            _done = true;
-            Button.IsEnabled = false;
-            Button.Content = label;
-        }
+        /// <summary>The file was in the download folder already when the row was made.</summary>
+        public bool OnDisk { get; init; }
 
-        public void MarkFailed()
+        /// <summary>The Noctis library has this song; it can still be downloaded, but "Download all" leaves it out.</summary>
+        public bool InLibrary { get; set; }
+
+        public bool CanStart => !OnDisk && Download?.State is null or DownloadState.Failed or DownloadState.Cancelled;
+
+        /// <summary>Puts the state of the download on the button.</summary>
+        public void Show()
         {
-            _busy = false;
-            Button.IsEnabled = true;
-            Button.Content = "Retry";
+            var state = Download?.State;
+            Button.Content = OnDisk ? "Downloaded" : state switch
+            {
+                DownloadState.Queued => "Queued",
+                DownloadState.Running => Download!.Progress > 0 ? $"{Download.Progress:P0}" : "Starting…",
+                DownloadState.Saved => "Downloaded",
+                DownloadState.AlreadyThere => "Already saved",
+                DownloadState.Failed => "Retry",
+                _ => "Download",
+            };
+            Button.IsEnabled = CanStart;
+            ToolTip.SetTip(Button, state == DownloadState.Failed ? Download!.Error : null);
         }
     }
 }

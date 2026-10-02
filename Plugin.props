@@ -1,0 +1,21 @@
+<Project>
+  <!--
+    Shared by the plugin and its tests. Two things are written once, in FreeMusicFinder/plugin.json,
+    and read from there:
+
+    "version": the version of the plugin (the DLL's and the zip's).
+
+    "minAppVersion": the oldest Noctis the plugin runs in. The plugin is BUILT against that Noctis
+    release (the tag v<minAppVersion> of the Noctis repo, which build.ps1 clones into
+    extern/Noctis-<minAppVersion>). .NET only loads a plugin whose references are not newer than
+    what the app has, so a plugin built against today's Noctis source is refused by every older
+    Noctis ("Could not load file or assembly Noctis.Plugins.Abstractions, Version=..."), while one
+    built against the oldest supported release runs in that one and all later ones.
+    Override with -p:NoctisRepo=<path to a Noctis checkout>.
+  -->
+  <PropertyGroup>
+    <PluginVersion>$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)FreeMusicFinder\plugin.json')), '&quot;version&quot;\s*:\s*&quot;([0-9.]+)&quot;').Groups.get_Item(1).Value)</PluginVersion>
+    <PluginMinAppVersion>$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)FreeMusicFinder\plugin.json')), '&quot;minAppVersion&quot;\s*:\s*&quot;([0-9.]+)&quot;').Groups.get_Item(1).Value)</PluginMinAppVersion>
+    <NoctisRepo Condition="'$(NoctisRepo)' == ''">$(MSBuildThisFileDirectory)extern\Noctis-$(PluginMinAppVersion)</NoctisRepo>
+  </PropertyGroup>
+</Project>

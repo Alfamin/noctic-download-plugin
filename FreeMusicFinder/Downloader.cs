@@ -7,8 +7,23 @@ internal enum DownloadOutcome { Saved, AlreadyThere }
 /// <summary>Saves tracks into the download folder.</summary>
 internal static class Downloader
 {
-    // A track only learns its extension while it is downloaded, so all of these are checked for an earlier copy.
-    private static readonly string[] AudioExtensions = { "flac", "mp3", "m4a", "ogg", "opus", "wav" };
+    /// <summary>
+    /// The only kinds of file that are ever written. The bot is a third party: whatever else
+    /// it sends is refused. A track only learns its extension while it is downloaded, so all
+    /// of these are also checked for an earlier copy.
+    /// </summary>
+    public static readonly IReadOnlyList<string> AudioExtensions = new[] { "flac", "mp3", "m4a", "ogg", "opus", "wav", "aac", "wma", "aiff", "aif", "wv", "ape" };
+
+    // A download in progress. The name is the plugin's own, so that tidying up never touches another program's files.
+    private const string PartSuffix = ".fmf.part";
+    private static readonly TimeSpan Abandoned = TimeSpan.FromMinutes(10);
+
+    /// <summary>The folder tracks are saved into: the configured one, or <see cref="DefaultFolder"/>.</summary>
+    public static string Folder(string? configured, string pluginDataDirectory)
+    {
+        configured = configured?.Trim();
+        return string.IsNullOrEmpty(configured) ? DefaultFolder(pluginDataDirectory) : Environment.ExpandEnvironmentVariables(configured);
+    }
 
     /// <summary>
     /// Where tracks go when no download folder is configured: inside the first Noctis library
@@ -49,22 +64,54 @@ internal static class Downloader
         }
     }
 
-    /// <summary>The file the track was saved as, or null when it is not in the folder.</summary>
-    public static string? FindExisting(string folder, BotTrack track)
-        => AudioExtensions.Select(e => Stem(folder, track) + "." + e).FirstOrDefault(File.Exists);
+    /// <summary>
+    /// The file names (without extension) for one result list, in its order: "Artist - Title".
+    /// Where the list has the same artist and title with different lengths (an album and a live
+    /// version), each of those carries its length, "Artist - Title (4.18)", so that one does not
+    /// stand in for the other.
+    /// </summary>
+    public static IReadOnlyList<string> FileNames(IReadOnlyList<BotText.Line> lines)
+    {
+        var names = lines.Select(l => Sanitize($"{l.Artist} - {l.Title}")).ToArray();
+        foreach (var same in Enumerable.Range(0, names.Length).GroupBy(i => names[i], StringComparer.OrdinalIgnoreCase))
+        {
+            if (same.Select(i => lines[i].Duration).Distinct().Count() < 2) continue;
+            foreach (var i in same)
+                if (lines[i].Duration is { } length)
+                    names[i] += $" ({(length.TotalHours >= 1 ? length.ToString(@"h\.mm\.ss") : length.ToString(@"m\.ss"))})";
+        }
+        return names;
+    }
+
+    /// <summary>The file a track was saved as, or null when it is not in the folder.</summary>
+    public static string? FindExisting(string folder, string fileName)
+        => AudioExtensions.Select(e => Path.Combine(folder, fileName + "." + e)).FirstOrDefault(File.Exists);
 
     public static async Task<DownloadOutcome> DownloadAsync(BotTrack track, string folder, IProgress<double>? progress, CancellationToken ct)
     {
         Directory.CreateDirectory(folder);
-        if (FindExisting(folder, track) is not null) return DownloadOutcome.AlreadyThere;
+        if (FindExisting(folder, track.FileName) is not null) return DownloadOutcome.AlreadyThere;
 
-        var partial = Stem(folder, track) + ".part";
+        var partial = Path.Combine(folder, track.FileName + PartSuffix);
         try
         {
             string extension;
+            long length;
             await using (var output = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true))
+            {
                 extension = await track.Fetch(output, progress, ct).ConfigureAwait(false);
-            File.Move(partial, Stem(folder, track) + "." + extension, overwrite: true);
+                length = output.Length;
+            }
+            if (!AudioExtensions.Contains(extension)) throw new InvalidDataException($"The bot sent a \".{extension}\" file, which is not a song.");
+            if (length == 0) throw new InvalidDataException("The bot sent an empty file.");
+
+            var target = Path.Combine(folder, track.FileName + "." + extension);
+            if (File.Exists(target))
+            {
+                File.Delete(partial);
+                return DownloadOutcome.AlreadyThere;
+            }
+            File.Move(partial, target);
         }
         catch
         {
@@ -74,8 +121,35 @@ internal static class Downloader
         return DownloadOutcome.Saved;
     }
 
-    private static string Stem(string folder, BotTrack track)
-        => Path.Combine(folder, Sanitize($"{track.Artist} - {track.Title}"));
+    /// <summary>
+    /// Removes what a download left behind when Noctis was closed or crashed in the middle of
+    /// it: this plugin's own part files that nothing has written to for ten minutes.
+    /// Returns how many were removed.
+    /// </summary>
+    public static int CleanLeftovers(string folder)
+    {
+        var removed = 0;
+        try
+        {
+            if (!Directory.Exists(folder)) return 0;
+            foreach (var file in Directory.EnumerateFiles(folder, "*" + PartSuffix))
+            {
+                try
+                {
+                    if (DateTime.UtcNow - File.GetLastWriteTimeUtc(file) < Abandoned) continue;
+                    File.Delete(file);
+                    removed++;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
+        return removed;
+    }
 
     private static string Sanitize(string name)
     {
@@ -83,7 +157,7 @@ internal static class Downloader
         // The Windows set is used everywhere so a library moved between systems keeps working.
         var cleaned = new string(name.Select(c => invalid.Contains(c) || "<>:\"/\\|?*".Contains(c) || char.IsControl(c) ? '_' : c).ToArray())
             .Trim().TrimEnd('.');
-        if (cleaned.Length > 150) cleaned = cleaned[..150].TrimEnd();
+        if (cleaned.Length > 150) cleaned = cleaned[..150].TrimEnd().TrimEnd('.');
         return cleaned.Length == 0 ? "track" : cleaned;
     }
 }
