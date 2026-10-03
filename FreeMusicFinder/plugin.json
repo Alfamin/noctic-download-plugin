@@ -1,7 +1,7 @@
 {
   "id": "dev.moshi.freemusicfinder",
   "name": "Free Music Finder",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "author": "moshi",
   "description": "Search the Telegram music bot @MusicsHuntersbot through your own Telegram account and download tracks into your library. The bot is a third party and is not limited to freely licensed music; what you download through it is your responsibility.",
   "type": "dotnet",
@@ -11,7 +11,8 @@
   "platforms": ["windows", "macos", "linux"],
   "permissions": ["menu.commands", "notifications", "network", "library.read"],
   "settings": [
-    { "key": "openSearch", "label": "Open the search window", "description": "Flip this switch (either way) to open the search window. You can also right-click any track → \"Find more by this artist…\".", "type": "bool", "default": false },
+    { "key": "shortcut", "label": "Shortcut", "description": "Press this anywhere in Noctis to open the search window (on a Mac, Ctrl means Cmd). Write it like Ctrl+Shift+F or Ctrl+Alt+M; leave it empty to turn it off. If Noctis itself uses the same keys, Noctis wins.", "type": "string", "default": "Ctrl+Shift+F" },
+    { "key": "openSearch", "label": "Open the search window", "description": "Flip this switch (either way) to open the search window. Quicker: press the shortcut above anywhere in Noctis. You can also right-click any track → \"Find more by this artist…\".", "type": "bool", "default": false },
     { "key": "downloadFolder", "label": "Download folder", "description": "Leave empty to save into \"Noctis Free Music\" inside your first Noctis library folder, so downloads appear in the library right away (needs Watch Folders on). If you set a folder outside the library, add it to your Noctis library folders.", "type": "string", "default": "" },
     { "key": "proxy", "label": "Proxy", "description": "Leave empty to connect to Telegram directly (or through a VPN that covers the whole computer). Where Telegram is blocked, put a Telegram proxy link here (https://t.me/proxy?server=…&port=…&secret=…) or a SOCKS5 proxy (socks5://host:port, or socks5://name:password@host:port). It is used from the next search or login on. Noctis keeps this setting as plain text.", "type": "string", "default": "" }
   ]

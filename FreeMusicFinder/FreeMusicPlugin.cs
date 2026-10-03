@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Input;
 using Avalonia.Threading;
 using Noctis.Plugins;
 
@@ -9,14 +10,16 @@ namespace FreeMusicFinder;
 /// <summary>
 /// Searches a Telegram music bot through the user's own Telegram account and downloads tracks
 /// into a folder.
-/// API 1.1 has no hook for a page or sidebar entry, so the plugin opens its own window, from
-/// the track menu or from the "Open the search window" switch in its settings. The downloads
-/// belong to the plugin: they go on when the window is closed and stop with the plugin.
+/// API 1.1 has no hook for a page or sidebar entry, so the plugin opens its own window: with a
+/// keyboard shortcut anywhere in Noctis, from the track menu, or from the "Open the search
+/// window" switch in its settings. The downloads belong to the plugin: they go on when the
+/// window is closed and stop with the plugin.
 /// </summary>
 public sealed class FreeMusicPlugin : INoctisPlugin
 {
     private const string OpenSearchKey = "openSearch";
     private const string ProxyKey = "proxy";
+    private const string ShortcutKey = "shortcut";
     internal const string DownloadFolderKey = "downloadFolder";
 
     private readonly List<IDisposable> _registrations = new();
@@ -25,6 +28,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     private TelegramBotSource? _bot;
     private Downloads? _downloads;
     private SearchWindow? _window;
+    private KeyGesture? _shortcut;
     // Read on the threads that connect to Telegram; settings themselves are only read on the UI thread.
     private volatile string _proxy = "";
 
@@ -52,6 +56,12 @@ public sealed class FreeMusicPlugin : INoctisPlugin
             (Action<TrackInfo>)(track => ShowWindow(track.Artist))));
 
         host.Settings.Changed += OnSettingChanged;
+
+        // The plugin kit has no shortcuts, but the plugin runs inside Noctis: a class handler sees
+        // the keys pressed in any of its windows. It only takes a key press nobody has handled,
+        // so a shortcut Noctis itself uses keeps working.
+        ApplyShortcut();
+        _registrations.Add(InputElement.KeyDownEvent.AddClassHandler<Window>(OnKeyDown));
 
         // What a download left behind when Noctis was last closed or crashed in the middle of it.
         var configured = host.Settings.GetString(DownloadFolderKey);
@@ -85,6 +95,29 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     {
         if (key == OpenSearchKey) ShowWindow(null);
         else if (key == ProxyKey) _proxy = _host?.Settings.GetString(ProxyKey) ?? "";
+        else if (key == ShortcutKey) ApplyShortcut();
+    }
+
+    private void ApplyShortcut()
+    {
+        if (_host is null) return;
+        try
+        {
+            _shortcut = Shortcut.Parse(_host.Settings.GetString(ShortcutKey), OperatingSystem.IsMacOS());
+        }
+        catch (FormatException ex)
+        {
+            _shortcut = null;
+            _host.Log("shortcut: " + ex.Message);
+            Announce("Free Music Finder: " + ex.Message);
+        }
+    }
+
+    private void OnKeyDown(Window window, KeyEventArgs e)
+    {
+        if (e.Handled || _shortcut is not { } shortcut || !shortcut.Matches(e)) return;
+        e.Handled = true;
+        ShowWindow(null);
     }
 
     private void ShowWindow(string? query)
@@ -108,6 +141,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
             }
 
             if (!string.IsNullOrWhiteSpace(query)) _window.Search(query);
+            else _window.FocusSearchBox();
         }
         catch (Exception ex)
         {

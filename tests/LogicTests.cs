@@ -15,6 +15,7 @@ internal static class LogicTests
         RightFile();
         SameSong();
         ProxySetting();
+        ShortcutSetting();
         await SocksAsync();
         await SavingAsync();
         Leftovers();
@@ -84,6 +85,22 @@ internal static class LogicTests
         Check.True(BotText.SameSong("Artist feat. Guest", "Song", null, "Artist", "Song", t(200)), "artist with a guest");
         Check.False(BotText.SameSong("A", "Song", t(200), "A", "Song Two", t(200)), "another title");
         Check.Equal("Song", BotText.Plain("Song (Live) [2011]"), "title without brackets");
+    }
+
+    private static void ShortcutSetting()
+    {
+        Check.Section("the shortcut setting");
+        static string Read(string text, bool isMac = false) => Shortcut.Parse(text, isMac) is { } g ? $"{g.Key}|{g.KeyModifiers}" : "off";
+        Check.Equal("F|Control, Shift", Read(Shortcut.Default), "the default is Ctrl+Shift+F");
+        Check.Equal("M|Alt, Control", Read(" ctrl+alt+m "), "written in small letters, with spaces around");
+        Check.Equal("F|Shift, Meta", Read(Shortcut.Default, isMac: true), "on a Mac, Ctrl means Cmd");
+        Check.Equal("F9|None", Read("F9"), "a function key alone is fine");
+        Check.Equal("off", Read(""), "empty is off");
+        Check.Equal("off", Read("Off"), "so is \"off\"");
+        Check.Throws<FormatException>(() => Shortcut.Parse("Shift+F", false), "a letter without Ctrl or Alt would fire while typing");
+        Check.Throws<FormatException>(() => Shortcut.Parse("M", false), "so would a letter alone");
+        Check.Throws<FormatException>(() => Shortcut.Parse("Ctrl+Banana", false), "a key that does not exist");
+        Check.Throws<FormatException>(() => Shortcut.Parse("Ctrl+Shift", false), "modifiers without a key");
     }
 
     private static void ProxySetting()

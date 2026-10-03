@@ -2,6 +2,7 @@ using System.Net.Sockets;
 using System.Reflection;
 using Avalonia.Controls;
 using Avalonia.Headless;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
 using FreeMusicFinder;
@@ -202,12 +203,13 @@ internal static class WindowTests
     {
         Check.Section("the plugin in Noctis");
         var host = new FakeHost(Check.NewFolder("plugin/noctis"), music);
+        host.Values["shortcut"] = Shortcut.Default; // what Noctis gives from plugin.json
         var dead = Path.Combine(folder, "Artist - Dead.fmf.part");
         File.WriteAllText(dead, "x");
         File.SetLastWriteTimeUtc(dead, DateTime.UtcNow.AddHours(-1));
 
         var plugin = new FreeMusicPlugin();
-        Check.Equal("2.1.0", plugin.Info.Version, "the version is the one in plugin.json");
+        Check.Equal("2.2.0", plugin.Info.Version, "the version is the one in plugin.json");
         plugin.Initialize(host);
         Check.Equal("Find more by this artist…", string.Join(",", host.Commands.Select(c => c.Label)), "one track menu entry");
         Check.Until(() => !File.Exists(dead), "what an interrupted download left behind is removed at the start");
@@ -234,11 +236,52 @@ internal static class WindowTests
         window = Window();
         Check.True(window is { IsVisible: true }, "the window opens again after it was closed");
 
+        // The shortcut, pressed in another Noctis window.
+        window?.Close();
+        var noctis = new Window { Width = 400, Height = 300 };
+        noctis.Show();
+        Check.False(Press(noctis, Key.F, KeyModifiers.Control), "Ctrl+F (Noctis's own search) is left to Noctis");
+        Check.True(Window() is null, "and opens nothing");
+        Press(noctis, Key.F, KeyModifiers.Control | KeyModifiers.Shift, handledAlready: true);
+        Check.True(Window() is null, "Ctrl+Shift+F that Noctis has already handled is left to Noctis");
+        Check.True(Press(noctis, Key.F, KeyModifiers.Control | KeyModifiers.Shift), "Ctrl+Shift+F is taken");
+        window = Window();
+        Check.True(window is { IsVisible: true }, "and opens the search window");
+        if (window is not null) Query(window).Text = "typed before";
+        Check.True(window is not null && Press(window, Key.F, KeyModifiers.Control | KeyModifiers.Shift), "pressed again in the search window");
+        Check.True(ReferenceEquals(window, Window()) && window is not null && Query(window).SelectedText == "typed before",
+            "it stays one window, with the search box selected for a new search");
+
+        window?.Close();
+        host.Values["shortcut"] = "Ctrl+Alt+M";
+        host.Raise("shortcut");
+        Press(noctis, Key.F, KeyModifiers.Control | KeyModifiers.Shift);
+        Check.True(Window() is null, "a changed shortcut replaces the old one");
+        Press(noctis, Key.M, KeyModifiers.Control | KeyModifiers.Alt);
+        Check.True(Window() is { IsVisible: true }, "the new one works at once");
+        Window()?.Close();
+        host.Values["shortcut"] = "Shift+F";
+        host.Raise("shortcut");
+        Check.Until(() => host.Notices.Any(n => n.Contains("would get in the way of typing")), "a shortcut that would get in the way is refused with a notice");
+        Press(noctis, Key.F, KeyModifiers.Shift);
+        Check.True(Window() is null, "and does nothing");
+        host.Values["shortcut"] = "";
+        host.Raise("shortcut");
+        Press(noctis, Key.F, KeyModifiers.Control | KeyModifiers.Shift);
+        Check.True(Window() is null, "an empty setting turns the shortcut off");
+        host.Values["shortcut"] = Shortcut.Default;
+        host.Raise("shortcut");
+        Press(noctis, Key.F, KeyModifiers.Control | KeyModifiers.Shift);
+        window = Window();
+
         host.Values["proxy"] = "nonsense";
         host.Raise("proxy");
         plugin.Shutdown();
         Check.True(window is { IsVisible: false } && Window() is null, "switching the plugin off closes the window");
         Check.Equal(1, host.CommandsRemoved, "and takes the menu entry away");
+        Check.False(Press(noctis, Key.F, KeyModifiers.Control | KeyModifiers.Shift), "and the shortcut");
+        Check.True(Window() is null, "which opens nothing any more");
+        noctis.Close();
         Check.Equal(0, host.Logs.Count(l => l.Contains("could not")), "nothing went wrong on the way");
     }
 
@@ -278,6 +321,15 @@ internal static class WindowTests
         AvaloniaHeadlessPlatform.ForceRenderTimerTick();
         using var file = File.Create(Path.Combine(_pictures, name + ".png"));
         window.CaptureRenderedFrame()?.Save(file);
+    }
+
+    /// <summary>A key press in a window; returns whether someone took it.</summary>
+    private static bool Press(Window window, Key key, KeyModifiers modifiers, bool handledAlready = false)
+    {
+        var e = new KeyEventArgs { RoutedEvent = InputElement.KeyDownEvent, Key = key, KeyModifiers = modifiers, Handled = handledAlready };
+        window.RaiseEvent(e);
+        Dispatcher.UIThread.RunJobs();
+        return e.Handled && !handledAlready;
     }
 
     private static void Click(Button button)

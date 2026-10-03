@@ -158,6 +158,13 @@ internal sealed class SearchWindow : Window
         }
     }
 
+    /// <summary>Puts the cursor into the search box, with what is in it selected, ready for a new search.</summary>
+    public void FocusSearchBox()
+    {
+        _query.Focus();
+        _query.SelectAll();
+    }
+
     /// <summary>Fills the search box and runs the search.</summary>
     public void Search(string query)
     {

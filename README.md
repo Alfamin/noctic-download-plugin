@@ -24,8 +24,13 @@ Needs Noctis 1.5.3 or newer (plugin API 1.1). Step-by-step instructions for user
 
 Plugin API 1.1 cannot add a page or sidebar entry, so the plugin opens its own window:
 
+- press **Ctrl+Shift+F** anywhere in Noctis (Cmd+Shift+F on a Mac; change it or turn it off in
+  the plugin's **Shortcut** setting),
 - right-click any track → **Find more by this artist…**, or
 - Settings → Plugins → Free Music Finder → flip **Open the search window**.
+
+The shortcut is not a plugin API feature: the plugin listens to key presses in Noctis's windows
+and takes only ones Noctis has not handled, so if Noctis itself uses the same keys, Noctis wins.
 
 The first time, press **Log in to Telegram…** (see below). Then type an artist and title, press
 Enter, and press **Download** on a row or **Download all**. A search sends `/search <your text>`
@@ -120,7 +125,8 @@ Not covered by them: everything that needs the real bot and a real Telegram logi
 
 ## Layout
 
-- `FreeMusicFinder/FreeMusicPlugin.cs` — entry point: track menu command, settings switch, window lifetime, notices
+- `FreeMusicFinder/FreeMusicPlugin.cs` — entry point: track menu command, settings switch, shortcut, window lifetime, notices
+- `FreeMusicFinder/Shortcut.cs` — reads the shortcut setting
 - `FreeMusicFinder/SearchWindow.cs` — the search window (Avalonia, built in code)
 - `FreeMusicFinder/Downloads.cs` — the download queue: one at a time, independent of the window
 - `FreeMusicFinder/Downloader.cs` — file names, the download folder, saving a file, tidying up

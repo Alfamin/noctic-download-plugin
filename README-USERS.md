@@ -13,9 +13,9 @@ You need: Noctis 1.5.3 or newer, a Telegram account, and the file
 3. Enable the plugin and approve its permissions (track menu entry, notices, internet, reading
    the library).
 
-Updating from an older version works the same way: install the new zip over it. Noctis asks you
-to approve once more, because the plugin now also reads the library (to mark the songs you
-already have). Your Telegram login is kept.
+Updating from an older version works the same way: install the new zip over it. Your Telegram
+login is kept. Coming from 2.0, Noctis asks you to approve once more, because the plugin now
+also reads the library (to mark the songs you already have).
 
 ## 2. Where Telegram is blocked: VPN or proxy
 
@@ -39,8 +39,9 @@ Leave the setting empty otherwise.
 
 ## 4. Log in
 
-1. Open the search window: flip **Open the search window** in the plugin's settings, or
-   right-click any track → **Find more by this artist…**.
+1. Open the search window: press **Ctrl+Shift+F** anywhere in Noctis (Cmd+Shift+F on a Mac).
+   Also possible: right-click any track → **Find more by this artist…**, or flip
+   **Open the search window** in the plugin's settings.
 2. Press **Log in to Telegram…**.
 3. Enter the API id, the API hash and your phone number with country code (`+49…`).
 4. Enter the login code Telegram sends you, then your two-step password if you have one.
