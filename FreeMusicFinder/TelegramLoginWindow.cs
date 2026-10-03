@@ -197,7 +197,7 @@ internal sealed class TelegramLoginWindow : Window
     private static string Explain(Exception ex) => ex is SocketException or IOException or TimeoutException
         // Not an answer from Telegram: the connection itself did not work.
         ? "Telegram could not be reached (" + ex.Message.TrimEnd('.') + "). Where Telegram is blocked, turn on a VPN "
-          + "or set a proxy in the plugin's settings (Settings → Plugins → Free Music Finder)."
+          + "or its system proxy, or set a proxy in the plugin's settings (Settings → Plugins → Free Music Finder)."
         : Explain(ex.Message);
 
     private static string Explain(string error) => error switch

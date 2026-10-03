@@ -213,8 +213,8 @@ internal sealed class SearchWindow : Window
                 if (search != _search || _closed.IsCancellationRequested) return;
                 _host.Log("search failed: " + ex.Message);
                 _status.Text = ex is OperationCanceledException ? "The bot did not answer."
-                    : ex is TimeoutException or BotAnswerException or FormatException ? ex.Message
-                    : ex is SocketException or IOException ? "Telegram could not be reached. Where it is blocked, turn on a VPN or set a proxy in the plugin's settings."
+                    : ex is TimeoutException or BotAnswerException or FormatException or ProxyRefusedException ? ex.Message
+                    : ex is SocketException or IOException ? "Telegram could not be reached. Where it is blocked, turn on a VPN or its system proxy, or set a proxy in the plugin's settings."
                     : "Search failed: " + ex.Message;
             }
 

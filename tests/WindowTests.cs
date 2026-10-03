@@ -171,7 +171,7 @@ internal static class WindowTests
         {
             ("unreadable", unreadable),
             ("silent", "The bot did not answer."),
-            ("offline", "Telegram could not be reached. Where it is blocked, turn on a VPN or set a proxy in the plugin's settings."),
+            ("offline", "Telegram could not be reached. Where it is blocked, turn on a VPN or its system proxy, or set a proxy in the plugin's settings."),
             ("proxy", "The proxy setting is not understood. " + ProxyChoice.Help),
             ("nothing", "Nothing found."),
         })
@@ -209,7 +209,7 @@ internal static class WindowTests
         File.SetLastWriteTimeUtc(dead, DateTime.UtcNow.AddHours(-1));
 
         var plugin = new FreeMusicPlugin();
-        Check.Equal("2.2.0", plugin.Info.Version, "the version is the one in plugin.json");
+        Check.Equal("2.3.0", plugin.Info.Version, "the version is the one in plugin.json");
         plugin.Initialize(host);
         Check.Equal("Find more by this artist…", string.Join(",", host.Commands.Select(c => c.Label)), "one track menu entry");
         Check.Until(() => !File.Exists(dead), "what an interrupted download left behind is removed at the start");

@@ -15,8 +15,9 @@ internal static class LogicTests
         RightFile();
         SameSong();
         ProxySetting();
+        ComputerProxy();
         ShortcutSetting();
-        await SocksAsync();
+        await ProxiesAsync();
         await SavingAsync();
         Leftovers();
         await QueueAsync();
@@ -106,23 +107,53 @@ internal static class LogicTests
     private static void ProxySetting()
     {
         Check.Section("the proxy setting");
-        Check.Equal(null, ProxyChoice.Parse("  "), "empty means direct");
+        Check.Equal(ProxyKind.System, ProxyChoice.Parse("  ")!.Kind, "empty means: what the computer is set to use");
+        Check.Equal(ProxyKind.System, ProxyChoice.Parse("System")!.Kind, "so does \"system\"");
+        Check.Equal(null, ProxyChoice.Parse("direct"), "\"direct\" means no proxy at all");
         var mt = ProxyChoice.Parse("https://t.me/proxy?server=1.2.3.4&port=443&secret=ee0123abcd")!;
         Check.Equal("https://t.me/proxy?server=1.2.3.4&port=443&secret=ee0123abcd", mt.MtProxyUrl, "Telegram proxy link");
         Check.Equal(mt.MtProxyUrl, ProxyChoice.Parse("tg://proxy?server=1.2.3.4&port=443&secret=ee0123abcd")!.MtProxyUrl, "tg:// form of the same link");
         Check.Equal(mt.MtProxyUrl, ProxyChoice.Parse("t.me/proxy?server=1.2.3.4&port=443&secret=ee0123abcd")!.MtProxyUrl, "link without https://");
         var socks = ProxyChoice.Parse("socks5://127.0.0.1:1080")!;
-        Check.Equal("|127.0.0.1|1080||", $"{socks.MtProxyUrl}|{socks.Host}|{socks.Port}|{socks.User}|{socks.Password}", "socks5 without login");
+        Check.Equal("Socks5||127.0.0.1|1080||", $"{socks.Kind}|{socks.MtProxyUrl}|{socks.Host}|{socks.Port}|{socks.User}|{socks.Password}", "socks5 without login");
         var login = ProxyChoice.Parse("socks5://me:p%40ss@proxy.example:9050")!;
         Check.Equal("proxy.example|9050|me|p@ss", $"{login.Host}|{login.Port}|{login.User}|{login.Password}", "socks5 with login");
         var shared = ProxyChoice.Parse("https://t.me/socks?server=5.6.7.8&port=1080&user=u&pass=p")!;
         Check.Equal("|5.6.7.8|1080|u|p", $"{shared.MtProxyUrl}|{shared.Host}|{shared.Port}|{shared.User}|{shared.Password}", "Telegram's socks link");
-        foreach (var bad in new[] { "hello", "socks5://host", "https://example.com/proxy?server=a&port=1&secret=b", "https://t.me/proxy?server=a&port=1", "http://1.2.3.4:8080" })
+        var http = ProxyChoice.Parse("http://me:p%40ss@10.0.0.1:8080")!;
+        Check.Equal("Http|10.0.0.1|8080|me|p@ss", $"{http.Kind}|{http.Host}|{http.Port}|{http.User}|{http.Password}", "an HTTP proxy");
+        var bare = ProxyChoice.Parse("127.0.0.1:10808")!;
+        Check.Equal("HttpOrSocks5|127.0.0.1|10808", $"{bare.Kind}|{bare.Host}|{bare.Port}", "only host:port, the way Windows shows a proxy");
+        foreach (var bad in new[] { "hello", "127.0.0.1", "127.0.0.1:99999", "socks5://host", "https://example.com/proxy?server=a&port=1&secret=b", "https://t.me/proxy?server=a&port=1", "http://1.2.3.4:8080/page", "https://1.2.3.4:8080" })
             Check.Throws<FormatException>(() => ProxyChoice.Parse(bad), "refused: " + bad);
     }
 
-    /// <summary>A SOCKS5 proxy and a target that answers "pong", both on this computer.</summary>
-    private static async Task SocksAsync()
+    private static void ComputerProxy()
+    {
+        Check.Section("the computer's own proxy setting");
+        static string Show(ProxyChoice? proxy) => proxy is null ? "none" : $"{proxy.Kind} {proxy.Host}:{proxy.Port}";
+        const string telegram = "149.154.167.51";
+        const string without = "<local>;localhost;127.*;10.*;192.168.*";
+        Check.Equal("Http 127.0.0.1:10808", Show(SystemProxy.FromWindows("127.0.0.1:10808", without, telegram)), "Windows: one address for everything");
+        Check.Equal("none", Show(SystemProxy.FromWindows("127.0.0.1:10808", without, "192.168.1.5")), "an address on the list of exceptions goes without");
+        Check.Equal("none", Show(SystemProxy.FromWindows("127.0.0.1:10808", without, "nas")), "so does a name without a dot (<local>)");
+        Check.Equal("Http 127.0.0.1:10808", Show(SystemProxy.FromWindows("127.0.0.1:10808", null, "nas")), "no list of exceptions");
+        Check.Equal("Http 10.0.0.2:3128", Show(SystemProxy.FromWindows("http=10.0.0.1:8080;https=10.0.0.2:3128;socks=10.0.0.3:1080", "", telegram)), "one address per kind: the one for secure pages is taken");
+        Check.Equal("Socks5 10.0.0.3:1080", Show(SystemProxy.FromWindows("http=10.0.0.1:8080;socks=10.0.0.3", "", telegram)), "without that one the SOCKS proxy, on its usual port when none is given");
+        Check.Equal("Http 10.0.0.1:8080", Show(SystemProxy.FromWindows("http=http://10.0.0.1:8080", "", telegram)), "and last the one for plain pages");
+        Check.Equal("none", Show(SystemProxy.FromWindows("ftp=10.0.0.1:21", "", telegram)), "nothing that can be used");
+
+        Check.Equal("Http 127.0.0.1:10808", Show(SystemProxy.From(new WebProxy("http://127.0.0.1:10808"), telegram, 443)), "what .NET knows (macOS, Linux, a script): an HTTP proxy");
+        Check.Equal("Socks5 127.0.0.1:1080", Show(SystemProxy.From(new WebProxy("socks5://127.0.0.1:1080"), telegram, 443)), "a SOCKS proxy");
+        Check.Equal("none", Show(SystemProxy.From(new WebProxy("http://127.0.0.1:10808") { BypassList = new[] { @"149\.154\..*" } }, telegram, 443)), "an exception");
+        Check.Equal("none", Show(SystemProxy.From(null, telegram, 443)), "no proxy");
+        var withLogin = SystemProxy.From(new WebProxy("http://10.0.0.1:8080") { Credentials = new NetworkCredential("me", "secret") }, telegram, 443)!;
+        Check.Equal("me:secret", withLogin.User + ":" + withLogin.Password, "with its name and password");
+        Console.WriteLine("        (this computer, right now: " + Show(SystemProxy.For(telegram, 443)) + ")");
+    }
+
+    /// <summary>A SOCKS5 proxy, an HTTP proxy and a target that answers "pong", all on this computer.</summary>
+    private static async Task ProxiesAsync()
     {
         Check.Section("connecting through a SOCKS5 proxy");
         using var target = new TcpListener(IPAddress.Loopback, 0);
@@ -155,7 +186,7 @@ internal static class LogicTests
 
         async Task<string> PingAsync(ProxyChoice through, string host)
         {
-            using var tcp = await Socks5.ConnectAsync(through, host, targetPort);
+            using var tcp = await through.ConnectAsync(host, targetPort);
             var stream = tcp.GetStream();
             await stream.WriteAsync(Encoding.ASCII.GetBytes("ping"));
             var answer = new byte[4];
@@ -177,6 +208,83 @@ internal static class LogicTests
             await client.GetStream().WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 400 Bad Request\r\n\r\n"));
         });
         await Check.ThrowsAsync<IOException>(() => PingAsync(ProxyChoice.Parse($"socks5://127.0.0.1:{((IPEndPoint)web.LocalEndpoint).Port}")!, "127.0.0.1"), "something that is no SOCKS5 proxy is reported");
+
+        Check.Section("connecting through an HTTP proxy");
+        var tunnels = new List<string>();
+        using var httpProxy = new TcpListener(IPAddress.Loopback, 0);
+        httpProxy.Start();
+        var httpPort = ((IPEndPoint)httpProxy.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                var client = await httpProxy.AcceptTcpClientAsync();
+                _ = Task.Run(() => FakeHttpProxyAsync(client, tunnels));
+            }
+        });
+        Check.Equal("pong", await PingAsync(ProxyChoice.Parse($"http://127.0.0.1:{httpPort}")!, "127.0.0.1"), "without login, to an address");
+        Check.Equal("pong", await PingAsync(ProxyChoice.Parse($"http://me:secret@127.0.0.1:{httpPort}")!, "localhost"), "with login, to a name");
+        Check.Equal($"none 127.0.0.1:{targetPort} | me:secret localhost:{targetPort}", string.Join(" | ", tunnels), "what the proxy was asked");
+        await Check.ThrowsAsync<ProxyRefusedException>(() => PingAsync(ProxyChoice.Parse($"http://me:wrong@127.0.0.1:{httpPort}")!, "127.0.0.1"), "a wrong password is reported");
+        await Check.ThrowsAsync<ProxyRefusedException>(() => PingAsync(ProxyChoice.Parse($"http://127.0.0.1:{httpPort}")!, "refuse.me"), "a refused connection is reported");
+        await Check.ThrowsAsync<IOException>(() => PingAsync(ProxyChoice.Parse($"http://127.0.0.1:{proxyPort}")!, "127.0.0.1"), "something that is no HTTP proxy is reported");
+
+        Check.Section("connecting through a proxy of which only host:port is known");
+        tunnels.Clear();
+        asked.Clear();
+        Check.Equal("pong", await PingAsync(ProxyChoice.Parse($"127.0.0.1:{httpPort}")!, "127.0.0.1"), "an HTTP proxy is found out");
+        Check.Equal("pong", await PingAsync(ProxyChoice.Parse($"127.0.0.1:{proxyPort}")!, "127.0.0.1"), "a SOCKS5 proxy is found out");
+        Check.Equal("1 1", $"{tunnels.Count} {asked.Count}", "each was asked once");
+        await Check.ThrowsAsync<ProxyRefusedException>(() => PingAsync(ProxyChoice.Parse($"127.0.0.1:{httpPort}")!, "refuse.me"), "an HTTP proxy that says no is believed");
+        using var nobody = new TcpListener(IPAddress.Loopback, 0);
+        nobody.Start();
+        var free = ((IPEndPoint)nobody.LocalEndpoint).Port;
+        nobody.Stop();
+        await Check.ThrowsAsync<SocketException>(() => PingAsync(ProxyChoice.Parse($"127.0.0.1:{free}")!, "127.0.0.1"), "a proxy that is not there is reported");
+    }
+
+    private static async Task FakeHttpProxyAsync(TcpClient client, List<string> asked)
+    {
+        try
+        {
+            using var _ = client;
+            var stream = client.GetStream();
+            var head = new StringBuilder();
+            var one = new byte[1];
+            while (!head.ToString().EndsWith("\r\n\r\n", StringComparison.Ordinal))
+            {
+                if (await stream.ReadAsync(one) == 0) return;
+                head.Append((char)one[0]);
+            }
+            var lines = head.ToString().Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+            var words = lines[0].Split(' ');
+            if (words.Length != 3 || words[0] != "CONNECT") return;
+            const string header = "Proxy-Authorization: Basic ";
+            var login = lines.FirstOrDefault(l => l.StartsWith(header, StringComparison.Ordinal)) is { } line
+                ? Encoding.UTF8.GetString(Convert.FromBase64String(line[header.Length..]))
+                : "none";
+            Task Answer(string status) => stream.WriteAsync(Encoding.ASCII.GetBytes($"HTTP/1.1 {status}\r\n\r\n")).AsTask();
+            if (login is not ("none" or "me:secret"))
+            {
+                await Answer("407 Proxy Authentication Required");
+                return;
+            }
+            if (words[1].StartsWith("refuse.me:", StringComparison.Ordinal))
+            {
+                await Answer("502 Bad Gateway");
+                return;
+            }
+            lock (asked) asked.Add(login + " " + words[1]);
+
+            using var onward = new TcpClient();
+            await onward.ConnectAsync(IPAddress.Loopback, int.Parse(words[1][(words[1].LastIndexOf(':') + 1)..]));
+            await Answer("200 Connection established");
+            var there = onward.GetStream();
+            await Task.WhenAny(stream.CopyToAsync(there), there.CopyToAsync(stream));
+        }
+        catch (IOException)
+        {
+        }
     }
 
     private static async Task FakeSocksAsync(TcpClient client, List<string> asked)
@@ -193,6 +301,7 @@ internal static class LogicTests
             }
 
             var hello = await Read(2);
+            if (hello[0] != 5) return; // not SOCKS5: hung up on, as a real proxy does
             var methods = await Read(hello[1]);
             var login = "none";
             if (methods.Contains((byte)2))

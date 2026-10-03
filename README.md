@@ -62,14 +62,30 @@ was closed in the middle of it is removed at the next start.
 
 ## Where Telegram is blocked
 
-The plugin talks to Telegram itself, so it needs a connection that reaches Telegram: either a
-VPN that covers the whole computer, or the **Proxy** setting of the plugin:
+The plugin talks to Telegram itself, so it needs a connection that reaches Telegram. With the
+**Proxy** setting left empty it does what the computer does: it asks for the computer's own
+proxy at every connection (and at every reconnection, so switching a VPN on or off needs
+nothing) and goes through it, or connects directly when none is switched on.
 
-- a Telegram (MTProto) proxy link: `https://t.me/proxy?server=…&port=…&secret=…` (or `tg://proxy?…`),
+- Windows: the proxy under Settings → Network → Proxy, which a VPN app's "system proxy" mode
+  switches on, with its list of exceptions; read from the registry each time. A setup script
+  (PAC) is asked through .NET.
+- macOS and Linux: what .NET takes for the system proxy (the network settings; `HTTPS_PROXY`,
+  `ALL_PROXY`).
+
+An HTTP proxy is asked for a tunnel (`CONNECT`), a SOCKS proxy is spoken to as SOCKS5.
+
+The setting can also name a proxy:
+
+- `host:port`, when it is not known what kind it is: HTTP is tried, then SOCKS5,
 - a SOCKS5 proxy: `socks5://host:port`, or `socks5://name:password@host:port`
-  (Telegram's own `https://t.me/socks?…` links work too).
+  (Telegram's own `https://t.me/socks?…` links work too),
+- an HTTP proxy: `http://host:port`, or `http://name:password@host:port`,
+- a Telegram (MTProto) proxy link: `https://t.me/proxy?server=…&port=…&secret=…` (or `tg://proxy?…`),
+- `direct`: never a proxy, whatever the computer is set to.
 
-It is used from the next search or login on. Noctis keeps plugin settings as plain text.
+A changed setting is used from the next search or login on. Noctis keeps plugin settings as
+plain text.
 
 ## Telegram login
 
@@ -118,7 +134,8 @@ dotnet run --project tests
 ```
 
 They need neither Telegram nor a screen: the result list, file names, the "is this the file that
-was asked for" rule, the proxy setting (with a SOCKS5 proxy on the same computer), saving and
+was asked for" rule, the proxy setting and the computer's own (with a SOCKS5 and an HTTP proxy
+on the same computer), saving and
 tidying up, the download queue, and the search window on Avalonia's headless platform with a
 stand-in for the bot. With `FMF_PICTURES` set to a folder they also save pictures of the window.
 Not covered by them: everything that needs the real bot and a real Telegram login.
@@ -132,7 +149,7 @@ Not covered by them: everything that needs the real bot and a real Telegram logi
 - `FreeMusicFinder/Downloader.cs` — file names, the download folder, saving a file, tidying up
 - `FreeMusicFinder/BotText.cs` — reads the bot's result list; tells whether two descriptions mean the same song
 - `FreeMusicFinder/Telegram.cs` — the Telegram account (login steps, connection) and the bot: search and file download
-- `FreeMusicFinder/Proxy.cs` — the proxy setting and the SOCKS5 connection
+- `FreeMusicFinder/Proxy.cs` — the proxy setting, the computer's own proxy, and the SOCKS5 and HTTP connections
 - `FreeMusicFinder/TelegramStore.cs` — the protected file the Telegram session is kept in
 - `FreeMusicFinder/TelegramLoginWindow.cs` — the login window
 - `FreeMusicFinder/plugin.json` — manifest and declared settings

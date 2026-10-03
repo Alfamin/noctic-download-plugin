@@ -20,13 +20,18 @@ also reads the library (to mark the songs you already have).
 ## 2. Where Telegram is blocked: VPN or proxy
 
 The plugin needs to reach Telegram. If Telegram does not open where you are without a VPN,
-either keep a VPN on that covers the whole computer, or put a proxy into the plugin's **Proxy**
-setting (Settings → Plugins → Free Music Finder) before you log in:
+turn your VPN on. Nothing has to be set in the plugin: with its **Proxy** setting left empty it
+does what the computer does. When a proxy is switched on in the computer's own settings (the
+"system proxy" mode of a VPN app does that), Telegram is reached through it; a VPN that covers
+the whole computer works as well. Switching the VPN on or off later needs nothing either.
 
+Only if neither is what you use, put a proxy into the **Proxy** setting (Settings → Plugins →
+Free Music Finder) before you log in:
+
+- just its address, the way VPN apps show it: `127.0.0.1:10808`
+- a SOCKS5 proxy: `socks5://host:port`, or an HTTP proxy: `http://host:port`
 - a Telegram proxy link, the kind you tap in Telegram: `https://t.me/proxy?server=…&port=…&secret=…`
-- or a SOCKS5 proxy: `socks5://host:port`
-
-Leave the setting empty otherwise.
+- `direct` to never use a proxy, whatever the computer is set to
 
 ## 3. Get a Telegram API id and hash (once)
 

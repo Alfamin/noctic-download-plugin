@@ -44,7 +44,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     {
         _host = host;
         _proxy = host.Settings.GetString(ProxyKey) ?? "";
-        _telegram = new TelegramAccount(Path.Combine(host.DataDirectory, "telegram.dat"), () => _proxy);
+        _telegram = new TelegramAccount(Path.Combine(host.DataDirectory, "telegram.dat"), () => _proxy, Log);
         _bot = new TelegramBotSource(_telegram, Log);
         _downloads = new Downloads(Log);
         _downloads.Finished += Announce;

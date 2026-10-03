@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net.Sockets;
 using TL;
 using WTelegram;
 
@@ -9,6 +10,7 @@ internal sealed class TelegramAccount : IDisposable
 {
     private readonly TelegramStore _store;
     private readonly Func<string> _proxy;
+    private readonly Action<string>? _log;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private Client? _client;
     private string _clientProxy = "";
@@ -18,10 +20,12 @@ internal sealed class TelegramAccount : IDisposable
 
     /// <param name="storePath">The file the login is kept in.</param>
     /// <param name="proxy">The "Proxy" setting as it is now; read whenever a connection is made.</param>
-    public TelegramAccount(string storePath, Func<string> proxy)
+    /// <param name="log">Told which way a connection goes.</param>
+    public TelegramAccount(string storePath, Func<string> proxy, Action<string>? log = null)
     {
         _store = new TelegramStore(storePath);
         _proxy = proxy;
+        _log = log;
     }
 
     public bool IsLoggedIn => _store.Account.Length > 0;
@@ -159,10 +163,47 @@ internal sealed class TelegramAccount : IDisposable
         var setting = _proxy();
         var proxy = ProxyChoice.Parse(setting);
         var client = new Client(Config, _store.OpenSession());
-        if (proxy?.MtProxyUrl is { } url) client.MTProxyUrl = url;
-        else if (proxy is not null) client.TcpHandler = (host, port) => Socks5.ConnectAsync(proxy, host, port);
+        switch (proxy?.Kind)
+        {
+            case null: // "direct"
+                break;
+            case ProxyKind.Telegram:
+                client.MTProxyUrl = proxy.MtProxyUrl;
+                break;
+            case ProxyKind.System:
+                // Asked at every connection (the first one and each time Telegram is reconnected to),
+                // so switching the computer's proxy on or off, as a VPN app does, needs nothing here.
+                var direct = client.TcpHandler;
+                string? last = null;
+                client.TcpHandler = (host, port) =>
+                {
+                    var via = SystemProxy.For(host, port);
+                    var way = via is null ? "directly (the computer has no proxy switched on)" : $"through the computer's proxy {via.Host}:{via.Port}";
+                    if (way != last) _log?.Invoke("connecting to Telegram " + (last = way));
+                    return via is not null ? via.ConnectAsync(host, port) : direct is not null ? direct(host, port) : DirectAsync(host, port);
+                };
+                break;
+            default:
+                client.TcpHandler = proxy.ConnectAsync;
+                break;
+        }
         _clientProxy = setting;
         return client;
+    }
+
+    private static async Task<TcpClient> DirectAsync(string host, int port)
+    {
+        var tcp = new TcpClient();
+        try
+        {
+            await tcp.ConnectAsync(host, port).ConfigureAwait(false);
+            return tcp;
+        }
+        catch
+        {
+            tcp.Dispose();
+            throw;
+        }
     }
 
     private string? Config(string what) => what switch
