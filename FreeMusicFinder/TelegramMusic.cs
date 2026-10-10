@@ -4,14 +4,37 @@ using WTelegram;
 
 namespace FreeMusicFinder;
 
-internal sealed class HunterMusicSource(TelegramAccount account, Action<string> log) : IMusicSource
+internal sealed class HunterMusicSource : IMusicSource
 {
-    private readonly TelegramBotSource _bot = new(account, log);
-    public string Id => "Music Hunters";
+    private readonly TelegramAccount? _account;
+    private readonly IHunterBotSource _bot;
+    private readonly Action<string> _log;
+    public HunterMusicSource(TelegramAccount account,Action<string> log)
+    {_account=account;_bot=new TelegramBotSource(account,log);_log=log;}
+    internal HunterMusicSource(IHunterBotSource bot,Action<string>? log=null)
+    {_bot=bot;_log=log??(_=>{});}
+    public string Id => BotSelections.Hunters;
     public async Task<IReadOnlyList<MusicRequest>> SearchAsync(string query, CancellationToken ct)
-        => (await _bot.SearchAsync(query, ct).ConfigureAwait(false)).Select(t => new MusicRequest(t.Title,t.Artist,t.Duration?.TotalSeconds)).ToArray();
+        => (await _bot.SearchAsync(query, ct).ConfigureAwait(false)).Select(t =>
+            (t.Request??new MusicRequest(t.Title,t.Artist,t.Duration?.TotalSeconds)) with {PreferredSource=Id}).ToArray();
     public async Task<string> FetchAsync(MusicRequest request, Stream output, IProgress<double>? progress, CancellationToken ct)
     {
+        request=BotSelections.ForSource(request,Id);
+        if(_account is not null && await TryCachedAsync(request,output,progress,ct).ConfigureAwait(false) is {} cached)return cached;
+        if(request.Selection is not null)
+        {
+            try {return await _bot.FetchSelectedAsync(request,output,progress,ct).ConfigureAwait(false);}
+            catch(StaleSelectionException ex){_log(ex.Message);}
+        }
+        var tracks = await _bot.SearchAsync(request.Artist + " " + request.Title, ct).ConfigureAwait(false);
+        var match = tracks.FirstOrDefault(t => RecordingMatch.Fits(request,t.Artist,t.Title,t.Duration));
+        if (match is null) throw new TrackUnavailableException("No matching recording in Music Hunters' results.");
+        // A stale selection is refreshed once; no search loop and no human button press.
+        return await match.Fetch(output,progress,ct).ConfigureAwait(false);
+    }
+    private async Task<string?> TryCachedAsync(MusicRequest request,Stream output,IProgress<double>? progress,CancellationToken ct)
+    {
+        var account=_account!;
         var cachedClient=await account.ConnectAsync(ct).ConfigureAwait(false);
         var cachedPeer=(await cachedClient.Contacts_ResolveUsername(TelegramBotSource.Bot)).User;
         if(await TelegramAudioCache.Find(cachedClient,cachedPeer,request,ct).ConfigureAwait(false) is {} existing)
@@ -30,10 +53,7 @@ internal sealed class HunterMusicSource(TelegramAccount account, Action<string> 
                 return Path.GetExtension(doc.Filename??"").TrimStart('.').ToLowerInvariant();
             }
         }
-        var tracks = await _bot.SearchAsync(request.Artist + " " + request.Title, ct).ConfigureAwait(false);
-        var match = tracks.FirstOrDefault(t => RecordingMatch.Fits(request,t.Artist,t.Title,t.Duration));
-        if (match is null) throw new TrackUnavailableException("No matching recording in Music Hunters' results.");
-        return await match.Fetch(output,progress,ct).ConfigureAwait(false);
+        return null;
     }
 }
 
@@ -118,8 +138,7 @@ internal sealed class DeezLoadSource : IMusicSource
                 var matches=await client.Messages_GetInlineBotResults(bot,bot,request.Artist+" "+request.Title,"").WaitAsync(ct).ConfigureAwait(false);
                 foreach(var item in matches.results.OfType<BotInlineMediaResult>())
                     if(item.document is Document doc && Fits(request,doc)) return await Download(client,doc,output,progress,ct).ConfigureAwait(false);
-                url=matches.results.OfType<BotInlineResult>().Where(r=>r.send_message is BotInlineMessageText)
-                    .Select(r=>Regex.Match(((BotInlineMessageText)r.send_message).message,@"https://(?:www\.)?deezer\.com/(?:[a-z]{2}/)?track/\d+").Value).FirstOrDefault(s=>s.Length>0);
+                url=MatchingInlineLink(request,matches.results.OfType<BotInlineResult>());
             }
             if(!MusicLink.TryParse(url,out var link) || link!.Kind!="track") throw new TrackUnavailableException("DeezLoad did not return a usable track link.");
             var sent=await client.SendMessageAsync(bot,link.Url).WaitAsync(ct).ConfigureAwait(false);
@@ -148,6 +167,10 @@ internal sealed class DeezLoadSource : IMusicSource
     }
     internal Exception Translate(RpcException ex)
         => BotLimits.Read(Id,ex.Message,DateTimeOffset.UtcNow) ?? (Exception)new BotAnswerException("DeezLoad: "+ex.Message);
+    internal static string? MatchingInlineLink(MusicRequest wanted,IEnumerable<BotInlineResult> results)
+        => results.Where(r=>r.send_message is BotInlineMessageText)
+            .Select(r=>InlineTrack(r.title??"",r.description??"",((BotInlineMessageText)r.send_message).message))
+            .FirstOrDefault(r=>r is not null && RecordingMatch.Fits(wanted,r.Artist,r.Title,r.Duration))?.Url;
     internal static MusicRequest? Request(Document doc,int? messageId)
     {
         var audio=doc.attributes?.OfType<DocumentAttributeAudio>().FirstOrDefault();

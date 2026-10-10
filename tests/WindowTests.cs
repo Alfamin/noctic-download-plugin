@@ -237,7 +237,7 @@ internal static class WindowTests
         File.SetLastWriteTimeUtc(dead, DateTime.UtcNow.AddHours(-1));
 
         var plugin = new FreeMusicPlugin();
-        Check.Equal("2.5.1", plugin.Info.Version, "the version is the one in plugin.json");
+        Check.Equal("2.5.2", plugin.Info.Version, "the version is the one in plugin.json");
         plugin.Initialize(host);
         Check.Equal("Find more by this artist…", string.Join(",", host.Commands.Select(c => c.Label)), "one track menu entry");
         Check.Until(() => !File.Exists(dead), "what an interrupted download left behind is removed at the start");

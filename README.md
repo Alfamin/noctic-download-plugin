@@ -3,7 +3,9 @@
 Finds songs and imports Spotify/Deezer playlists through Music Hunters and DeezLoad using
 your own Telegram account, from inside [Noctis](https://github.com/heartached/Noctis).
 
-Version 2.5.1 adds editable queues and priority downloads. Version 2.5 added full metadata manifests, individual source fallback, durable queues across
+Version 2.5.2 preserves exact Music Hunters search buttons across downloads and queue restarts,
+binds each result to the bot that returned it, and checks DeezLoad inline artist/title links.
+Version 2.5.1 added editable queues and priority downloads. Version 2.5 added full metadata manifests, individual source fallback, durable queues across
 restarts, independent bot cooldowns and a visible progress/pause panel. Music Hunters handles
 quick searches first; playlist requests prefer DeezLoad when available. See
 [user instructions](README-USERS.md#good-to-know).
@@ -56,6 +58,10 @@ the file.
 - Only the file that was asked for is saved. The bot answers everything in one chat, so a file
   can arrive that belongs to an earlier request or is something else altogether; it is told
   apart by its name and length and left alone. Files that are not songs are never saved.
+- Music Hunters results preserve their numbered callback and originating message: selecting
+  a result presses that exact button instead of repeating the search. Deleted/expired buttons
+  trigger one fresh search and a matching selection, then normal source fallback. DeezLoad uses
+  its own inline search/track-link protocol. Callback bytes and chat message IDs never cross bots.
 
 Files are saved as `Artist - Title.ext` in a `Noctis Free Music` folder inside your first Noctis
 library folder (change it in the plugin's settings). Where the result list has the same artist

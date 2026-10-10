@@ -76,6 +76,11 @@ transfer and playlist imports, and erases the saved requests/history. Downloaded
 The queue has pages, so requests beyond the first 100 remain accessible. Removed songs stay removed
 after restarting Noctis. You can deliberately add them again later.
 
+Selecting a Music Hunters result automatically presses its matching bot button. You do not need
+to open Telegram or choose the option there. If the button expired, the plugin searches once for
+the same artist/title/version and selects the matching result. Each result remembers its source;
+DeezLoad uses track links, while Music Hunters uses its own numbered options.
+
 Songs are saved as `Artist - Title.ext` in a `Noctis Free Music` folder inside your first Noctis
 library folder and appear in the library a moment later. **Open folder** shows where they are.
 You can close the window while songs are downloading: they go on, and Noctis shows a notice

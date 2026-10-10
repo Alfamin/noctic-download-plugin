@@ -4,7 +4,8 @@ using System.Text.RegularExpressions;
 namespace FreeMusicFinder;
 
 internal sealed record MusicRequest(string Title, string Artist, double? Seconds = null, string? Url = null,
-    bool? Explicit = null, string? Playlist = null, int Position = 0, int? MessageId = null, string? CachedFrom = null, string? PreferredSource = null, string? OriginUri = null)
+    bool? Explicit = null, string? Playlist = null, int Position = 0, int? MessageId = null, string? CachedFrom = null, string? PreferredSource = null, string? OriginUri = null,
+    BotSelection? Selection = null)
 {
     public TimeSpan? Duration => Seconds is > 0 and <= 86400 ? TimeSpan.FromSeconds(Seconds.Value) : null;
     public string Identity => OriginUri is {Length:>0} ? OriginUri : Url is { Length: > 0 } ? Url : BotText.Key(Artist) + "|" + BotText.Key(Title) + "|" + Seconds;
@@ -103,7 +104,8 @@ internal sealed class MusicSources
                 try
                 {
                     var items = await source.SearchAsync(query, ct).ConfigureAwait(false);
-                    if (items.Count > 0) return items.Select(Track).ToArray();
+                    // The result belongs to the bot that returned it, including a backup search.
+                    if (items.Count > 0) return items.Select(r=>Track(r with {PreferredSource=source.Id})).ToArray();
                 }
                 catch (SourceLimitException ex) { Block(ex); if (ex.Global) throw Waiting(); errors.Add(ex.Message); }
                 catch (TL.RpcException ex) when (BotLimits.Read(source.Id,ex.Message,_now()) is not null)
@@ -124,13 +126,15 @@ internal sealed class MusicSources
         try
         {
             CheckGlobal(); var errors = new List<string>();
-            foreach (var source in _sources.OrderBy(s => request.CachedFrom == s.Id ? 0 : request.PreferredSource == s.Id ? 1 : 2))
+            foreach (var source in _sources.OrderBy(s => request.CachedFrom == s.Id ? 0 : request.Selection?.Provider == s.Id ? 1 : request.PreferredSource == s.Id ? 2 : 3))
             {
                 if (Cooling(source.Id) && request.CachedFrom != source.Id) continue;
                 try
                 {
                     if (output.CanSeek) { output.SetLength(0); output.Position = 0; }
-                    var ext = await source.FetchAsync(request, output, progress, ct).ConfigureAwait(false);
+                    // Callbacks and chat message IDs are scoped to one provider. Only recording
+                    // metadata and public track URLs may cross to the fallback bot.
+                    var ext = await source.FetchAsync(BotSelections.ForSource(request,source.Id), output, progress, ct).ConfigureAwait(false);
                     if (ext != "flac") throw new TrackUnavailableException("FLAC was requested, but this source returned " + ext + ".");
                     return ext;
                 }
@@ -139,7 +143,7 @@ internal sealed class MusicSources
                 {var limit=BotLimits.Read(source.Id,ex.Message,_now())!;Block(limit);if(limit.Global)throw Waiting();errors.Add(limit.Message);}
                 catch(System.Net.Sockets.SocketException ex)
                 {Block(new(source.Id,"TELEGRAM_CONNECTION_FAILED: "+ex.Message+" Check the VPN/proxy; queued work is preserved.",_now().AddMinutes(10),true));throw Waiting();}
-                catch (Exception ex) when (ex is TimeoutException or BotAnswerException or TrackUnavailableException)
+                catch (Exception ex) when (ex is TimeoutException or BotAnswerException or TrackUnavailableException or StaleSelectionException)
                 { errors.Add(source.Id + ": " + ex.Message); _notice(source.Id + " could not supply “" + request.Title + "”; trying the backup."); }
             }
             if (_sources.Any(s => Cooling(s.Id))) throw Waiting();

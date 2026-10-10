@@ -224,7 +224,7 @@ internal sealed class TelegramAccount : IDisposable
 /// The bot answers every request in the same chat, so only one download may run at a time:
 /// <see cref="Downloads"/> sees to that.
 /// </summary>
-internal sealed class TelegramBotSource
+internal sealed class TelegramBotSource : IHunterBotSource
 {
     public const string Bot = "MusicsHuntersbot";
     private static readonly TimeSpan SearchWait = TimeSpan.FromSeconds(20);
@@ -253,22 +253,42 @@ internal sealed class TelegramBotSource
             var results = await WaitForAsync(client, bot, sent.id, m => Buttons(m).Any(), SearchWait, ct).ConfigureAwait(false)
                 ?? throw new TimeoutException("The bot did not answer.");
 
-            var buttons = new Dictionary<string, byte[]>();
-            foreach (var button in Buttons(results).Where(IsNumber)) buttons.TryAdd(button.Text, button.Data);
-            if (buttons.Count == 0) return Array.Empty<BotTrack>();
-
-            var lines = BotText.Lines(results.message ?? "").Where(l => buttons.ContainsKey(l.Number)).ToList();
-            if (lines.Count == 0)
-            {
-                // Results are there (numbered buttons), but not one line reads as "1. Artist - Title (3:59)".
-                _log($"the bot's answer has {buttons.Count} numbered buttons but no result line could be read: {Shorten(results.message ?? "", 300)}");
-                throw new BotAnswerException($"@{Bot} answered, but its list could not be read. The bot may have changed how it writes its results.");
-            }
-
-            var names = Downloader.FileNames(lines);
-            return lines.Select((line, i) => new BotTrack(line.Title, line.Artist, line.Duration, names[i],
-                (output, progress, token) => FetchAsync(results.id, buttons[line.Number], line, output, progress, token))).ToList();
+            return ParseResults(results,FetchSelectedAsync);
         }, ct);
+
+    internal static IReadOnlyList<BotTrack> ParseResults(Message results,
+        Func<MusicRequest,Stream,IProgress<double>?,CancellationToken,Task<string>> fetch)
+    {
+        var buttons=new Dictionary<string,byte[]>();
+        foreach(var button in Buttons(results).Where(IsNumber))
+            if(!buttons.TryAdd(button.Text,button.Data))throw new BotAnswerException("Music Hunters returned ambiguous duplicate option numbers.");
+        if(buttons.Count==0)return [];
+        var lines=BotText.Lines(results.message??"").Where(l=>buttons.ContainsKey(l.Number)).ToList();
+        if(lines.Count==0 || lines.GroupBy(l=>l.Number).Any(g=>g.Count()!=1))
+            throw new BotAnswerException($"@{Bot} answered, but its numbered results could not be read.");
+        var names=Downloader.FileNames(lines);
+        return lines.Select((line,i)=>
+        {
+            var selection=new BotSelection(BotSelections.Hunters,Bot,results.id,line.Number,Convert.ToBase64String(buttons[line.Number]));
+            _=BotSelections.DecodeHunter(selection);
+            var request=new MusicRequest(line.Title,line.Artist,line.Duration?.TotalSeconds,PreferredSource:BotSelections.Hunters,Selection:selection);
+            return new BotTrack(line.Title,line.Artist,line.Duration,names[i],(output,progress,ct)=>fetch(request,output,progress,ct)){Request=request};
+        }).ToArray();
+    }
+
+    internal static byte[] ValidateSelection(MusicRequest request,Message? message)
+    {
+        var selection=request.Selection??throw new StaleSelectionException("Music Hunters' selection was not saved.");
+        var data=BotSelections.DecodeHunter(selection);
+        if(message is null || message.id!=selection.MessageId || message.flags.HasFlag(Message.Flags.out_))
+            throw new StaleSelectionException("Music Hunters' selected message is no longer available; finding a fresh matching result.");
+        var button=Buttons(message).Where(b=>b.Text==selection.Number).ToArray();
+        var line=BotText.Lines(message.message??"").Where(l=>l.Number==selection.Number).ToArray();
+        if(button.Length!=1 || !button[0].Data.SequenceEqual(data) || line.Length!=1 ||
+            !RecordingMatch.Fits(request,line[0].Artist,line[0].Title,line[0].Duration))
+            throw new StaleSelectionException("Music Hunters' selected option changed; finding a fresh matching result.");
+        return data;
+    }
 
     /// <summary>
     /// Presses the result's button, waits for the file the bot sends and copies it to
@@ -276,21 +296,29 @@ internal sealed class TelegramBotSource
     /// other file the bot sends meanwhile (the late answer to an earlier request, or something
     /// that is not a song) is left alone.
     /// </summary>
-    private Task<string> FetchAsync(int resultsId, byte[] button, BotText.Line wanted, Stream output, IProgress<double>? progress, CancellationToken ct)
-        => RunAsync(async (client, bot) =>
+    internal Task<Document> RequestSelectedDocumentAsync(MusicRequest request,CancellationToken ct)
+    {
+        var selection=request.Selection??throw new StaleSelectionException("Music Hunters' selection was not saved.");
+        _=BotSelections.DecodeHunter(selection);
+        return RunAsync(async (client, bot) =>
         {
+            var old=await client.Messages_GetHistory(bot,offset_id:selection.MessageId+1,limit:1).WaitAsync(ct).ConfigureAwait(false);
+            var button=ValidateSelection(request,old.Messages.OfType<Message>().FirstOrDefault(m=>m.id==selection.MessageId));
+            var resultsId=selection.MessageId;
             var newest = (await client.Messages_GetHistory(bot, limit: 1).ConfigureAwait(false)).Messages.FirstOrDefault()?.ID ?? resultsId;
             string? notice = null;
             try { notice = (await client.Messages_GetBotCallbackAnswer(bot, resultsId, button).ConfigureAwait(false))?.message; }
             // The bot may acknowledge the press later than Telegram waits; the file still arrives.
             catch (RpcException ex) when (ex.Message.Contains("TIMEOUT", StringComparison.OrdinalIgnoreCase)) { }
+            catch(RpcException ex) when(IsStaleCallback(ex.Message))
+            {throw new StaleSelectionException("Music Hunters' selection expired; finding a fresh matching result.");}
             if (BotLimits.Read("Music Hunters", notice ?? "", DateTimeOffset.UtcNow) is { } limited) throw limited;
 
             string? other = null;
             var file = await WaitForAsync(client, bot, newest, m =>
             {
                 if (m.media is not MessageMediaDocument { document: Document sent }) return false;
-                if (Extension(sent) is not null && IsRequested(wanted, sent)) return true;
+                if (Extension(sent) is not null && DeezLoadSource.Fits(request, sent)) return true;
                 other = Describe(sent);
                 return false;
             }, FileWait, ct).ConfigureAwait(false);
@@ -301,8 +329,14 @@ internal sealed class TelegramBotSource
                     : string.IsNullOrWhiteSpace(notice) ? "The bot did not send the file."
                     : "The bot answered: " + notice);
             }
-            var document = (Document)((MessageMediaDocument)file.media).document;
+            return (Document)((MessageMediaDocument)file.media).document;
+        }, ct);
+    }
 
+    public async Task<string> FetchSelectedAsync(MusicRequest request,Stream output,IProgress<double>? progress,CancellationToken ct)
+    {
+            var document=await RequestSelectedDocumentAsync(request,ct).ConfigureAwait(false);
+            var client=await _account.ConnectAsync(ct).ConfigureAwait(false);
             var lastReport = 0.0;
             await client.DownloadFileAsync(document, output, (PhotoSizeBase?)null, (done, total) =>
             {
@@ -310,7 +344,9 @@ internal sealed class TelegramBotSource
                 if (total > 0 && (double)done / total - lastReport >= 0.02) progress?.Report(lastReport = (double)done / total);
             }).ConfigureAwait(false);
             return Extension(document)!;
-        }, ct);
+    }
+    internal static bool IsStaleCallback(string error)=>new[]{"MESSAGE_ID_INVALID","DATA_INVALID","BUTTON_DATA_INVALID","QUERY_ID_INVALID","RESULT_ID_INVALID"}
+        .Any(code=>error.Contains(code,StringComparison.OrdinalIgnoreCase));
 
     private async Task<T> RunAsync<T>(Func<Client, InputPeer, Task<T>> work, CancellationToken ct)
     {
@@ -330,6 +366,7 @@ internal sealed class TelegramBotSource
         {
             throw BotLimits.Read("Music Hunters", ex.Message, DateTimeOffset.UtcNow)!;
         }
+        catch(RpcException ex){throw new BotAnswerException("Music Hunters: "+ex.Message);}
     }
 
     /// <summary>
@@ -369,13 +406,6 @@ internal sealed class TelegramBotSource
     }
 
     private static bool IsNumber((string Text, byte[] Data) button) => button.Text.Length > 0 && button.Text.All(char.IsAsciiDigit);
-
-    private static bool IsRequested(BotText.Line wanted, Document sent)
-    {
-        var audio = sent.attributes?.OfType<DocumentAttributeAudio>().FirstOrDefault();
-        return audio is not null && RecordingMatch.Fits(new MusicRequest(wanted.Title,wanted.Artist,wanted.Duration?.TotalSeconds),
-            audio.performer??"",audio.title??"",audio.duration>0?TimeSpan.FromSeconds(audio.duration):null);
-    }
 
     /// <summary>What a file calls itself, for the message that says it was not the one asked for.</summary>
     private static string Describe(Document sent)
