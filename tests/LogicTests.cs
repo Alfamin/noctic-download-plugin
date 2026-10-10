@@ -41,7 +41,14 @@ internal static class LogicTests
         using var saved = new TelegramAccount(Path.Combine(folder, "saved.dat"), () => "");
         Check.Equal(98765, saved.ApiId, "existing custom API settings take precedence");
         Check.Equal("saved private hash", saved.ApiHash, "saved API hash is preserved");
+        store.ClearSession();
+        using var loggedOut = new TelegramAccount(Path.Combine(folder, "saved.dat"), () => "");
+        Check.Equal(98765, loggedOut.ApiId, "logging out keeps the custom API id for the next login");
+        Check.Equal("saved private hash", loggedOut.ApiHash, "logging out keeps the custom API hash");
         File.WriteAllText(path, "{\"api_id\":0,\"api_hash\":\"invalid secret\"}");
+        using var customAfterDefaultsChanged = new TelegramAccount(Path.Combine(folder, "saved.dat"), () => "");
+        Check.Equal(98765, customAfterDefaultsChanged.ApiId, "invalid replacement defaults cannot override the user's custom pair");
+        Check.Equal("", customAfterDefaultsChanged.DefaultsError, "an unused broken defaults file does not block a saved custom account");
         config = TelegramDefaults.Read(path);
         Check.False(config.Available, "invalid defaults do not enable login");
         Check.True(config.Error.StartsWith("TELEGRAM_DEFAULTS_INVALID"), "invalid defaults have a stable error code");
