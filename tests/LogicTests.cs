@@ -10,6 +10,7 @@ internal static class LogicTests
 {
     public static async Task RunAsync()
     {
+        PrivateDefaults();
         ResultList();
         FileNames();
         RightFile();
@@ -21,6 +22,33 @@ internal static class LogicTests
         await SavingAsync();
         Leftovers();
         await QueueAsync();
+    }
+
+    private static void PrivateDefaults()
+    {
+        Check.Section("private Telegram defaults and saved-account precedence");
+        var folder = Check.NewFolder("private-defaults");
+        var path = Path.Combine(folder, "telegram-defaults.private.json");
+        const string hash = "0123456789abcdef0123456789abcdef";
+        File.WriteAllText(path, "{\"api_id\":12345,\"api_hash\":\"" + hash + "\"}");
+        var config = TelegramDefaults.Read(path);
+        Check.True(config.Available, "valid private defaults accepted");
+        using var account = new TelegramAccount(Path.Combine(folder, "telegram.dat"), () => "");
+        Check.Equal(12345, account.ApiId, "new account uses deployment defaults");
+        Check.False(account.IsLoggedIn, "defaults never authenticate somebody else's account");
+        var store = new TelegramStore(Path.Combine(folder, "saved.dat"));
+        store.Begin(98765, "saved private hash");
+        using var saved = new TelegramAccount(Path.Combine(folder, "saved.dat"), () => "");
+        Check.Equal(98765, saved.ApiId, "existing custom API settings take precedence");
+        Check.Equal("saved private hash", saved.ApiHash, "saved API hash is preserved");
+        File.WriteAllText(path, "{\"api_id\":0,\"api_hash\":\"invalid secret\"}");
+        config = TelegramDefaults.Read(path);
+        Check.False(config.Available, "invalid defaults do not enable login");
+        Check.True(config.Error.StartsWith("TELEGRAM_DEFAULTS_INVALID"), "invalid defaults have a stable error code");
+        Check.False(config.Error.Contains("invalid secret"), "private values are not exposed in errors");
+        File.WriteAllText(path, new string('x', 4097));
+        Check.False(TelegramDefaults.Read(path).Available, "oversized defaults rejected");
+        Check.False(TelegramDefaults.Read(Path.Combine(folder, "missing.json")).Available, "public installation works without private defaults");
     }
 
     private static BotText.Line Line(string artist, string title, string? length = null, string number = "1")

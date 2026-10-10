@@ -95,6 +95,15 @@ The bot is used through your own Telegram account, so the login asks for:
 2. your phone number, then the login code Telegram sends you,
 3. your two-step verification password, if the account has one.
 
+Private installations may supply `telegram-defaults.private.json` in
+`<Noctis data>/plugin-data/dev.moshi.freemusicfinder/` with an `api_id` number and `api_hash` string.
+The public DLL and ZIP contain no shared credentials. With valid defaults, login asks for your phone
+number first and collapses API fields under **Advanced: Telegram API settings**. A saved account's
+custom API settings take precedence. Missing or invalid defaults require your own settings;
+`API_CREDENTIALS_REJECTED` explains how to override rejected defaults. The hash field is masked,
+private defaults are bounded/validated, and values are never included in login error logs.
+Share files containing actual defaults privately, never in this public repository.
+
 What is kept: the API id and hash, your account's display name and the session Telegram issued,
 in `telegram.dat` in the plugin's data folder (`<Noctis data>/plugin-data/dev.moshi.freemusicfinder/`).
 On Windows that file is encrypted with DPAPI, so only your Windows user on that computer can

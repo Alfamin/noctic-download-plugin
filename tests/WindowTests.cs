@@ -33,6 +33,7 @@ internal static class WindowTests
         try
         {
             NotLoggedIn(host, downloads, bot);
+            SimpleLogin(host);
 
             var account = LoggedIn(host);
             ResultsAndDownloads(host, account, downloads, bot, folder);
@@ -68,6 +69,30 @@ internal static class WindowTests
         store.Begin(12345, "not a real hash");
         store.SetAccount("@tester");
         return new TelegramAccount(path, () => "");
+    }
+
+    private static void SimpleLogin(FakeHost host)
+    {
+        Check.Section("phone-first Telegram login with optional Advanced settings");
+        var folder = Check.NewFolder("simple-login");
+        File.WriteAllText(Path.Combine(folder, "telegram-defaults.private.json"), "{\"api_id\":12345,\"api_hash\":\"0123456789abcdef0123456789abcdef\"}");
+        using var account = new TelegramAccount(Path.Combine(folder, "telegram.dat"), () => "");
+        var window = new TelegramLoginWindow(account, host);
+        window.Show();
+        var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var advanced = (Expander)typeof(TelegramLoginWindow).GetField("_advanced", flags)!.GetValue(window)!;
+        var hash = (TextBox)typeof(TelegramLoginWindow).GetField("_apiHash", flags)!.GetValue(window)!;
+        var intro = (TextBlock)typeof(TelegramLoginWindow).GetField("_intro", flags)!.GetValue(window)!;
+        Check.False(advanced.IsExpanded, "API settings are collapsed when defaults are ready");
+        Check.True(hash.PasswordChar != '\0', "the API hash is masked");
+        Check.True(intro.Text!.Contains("phone number"), "phone-number-first instructions");
+        var normalize = typeof(TelegramLoginWindow).GetMethod("Digits", flags | System.Reflection.BindingFlags.Static)!;
+        Check.Equal("+989123456789", (string?)normalize.Invoke(null, new object[] { "+۹۸۹۱۲۳۴۵۶۷۸۹" }), "Persian phone/code digits are accepted");
+        var explain = typeof(TelegramLoginWindow).GetMethod("Explain", flags | System.Reflection.BindingFlags.Static, null, new[] { typeof(string) }, null)!;
+        var rejected = (string)explain.Invoke(null, new object[] { "API_ID_INVALID" })!;
+        Check.True(rejected.Contains("Advanced") && rejected.Contains("API_CREDENTIALS_REJECTED"), "rejected defaults explain how to override them");
+        Picture(window, "7 phone-first login");
+        window.Close();
     }
 
     private static void ResultsAndDownloads(FakeHost host, TelegramAccount account, Downloads downloads, FakeBot bot, string folder)
@@ -209,7 +234,7 @@ internal static class WindowTests
         File.SetLastWriteTimeUtc(dead, DateTime.UtcNow.AddHours(-1));
 
         var plugin = new FreeMusicPlugin();
-        Check.Equal("2.3.0", plugin.Info.Version, "the version is the one in plugin.json");
+        Check.Equal("2.4.0", plugin.Info.Version, "the version is the one in plugin.json");
         plugin.Initialize(host);
         Check.Equal("Find more by this artist…", string.Join(",", host.Commands.Select(c => c.Label)), "one track menu entry");
         Check.Until(() => !File.Exists(dead), "what an interrupted download left behind is removed at the start");
@@ -314,7 +339,7 @@ internal static class WindowTests
 
     private static TextBox Query(SearchWindow window) => ((Grid)Root(window).Children[0]).Children.OfType<TextBox>().First();
 
-    private static void Picture(SearchWindow window, string name)
+    private static void Picture(Window window, string name)
     {
         if (_pictures is null) return;
         Dispatcher.UIThread.RunJobs();

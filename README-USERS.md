@@ -33,7 +33,11 @@ Free Music Finder) before you log in:
 - a Telegram proxy link, the kind you tap in Telegram: `https://t.me/proxy?server=…&port=…&secret=…`
 - `direct` to never use a proxy, whatever the computer is set to
 
-## 3. Get a Telegram API id and hash (once)
+## 3. Telegram app settings (only if none were supplied)
+
+**Private friend setup:** if your installer supplied app settings, skip this section. Login asks for
+your phone number first. You can change the API id/hash under **Advanced: Telegram API settings**.
+The public plugin does not contain shared credentials.
 
 1. Open <https://my.telegram.org> and sign in with your phone number and the code Telegram
    sends to your Telegram app.
@@ -48,10 +52,15 @@ Free Music Finder) before you log in:
    Also possible: right-click any track → **Find more by this artist…**, or flip
    **Open the search window** in the plugin's settings.
 2. Press **Log in to Telegram…**.
-3. Enter the API id, the API hash and your phone number with country code (`+49…`).
+3. Enter your phone number with country code (`+98…`). If app settings were not supplied, fill in
+   your API id/hash under **Advanced: Telegram API settings** first.
 4. Enter the login code Telegram sends you, then your two-step password if you have one.
 
 The button now shows your account name. You only log in once.
+
+`API_CREDENTIALS_REJECTED` means Telegram rejected the app defaults: open Advanced and supply a
+valid pair. `TELEGRAM_CONNECTION_FAILED` means Telegram could not be reached: check your VPN/proxy.
+Your phone number, login code and two-step password are never filled in by someone else's setup.
 
 ## 5. Search and download
 

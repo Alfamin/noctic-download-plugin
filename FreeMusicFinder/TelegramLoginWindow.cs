@@ -27,6 +27,7 @@ internal sealed class TelegramLoginWindow : Window
     private readonly StackPanel _phonePanel;
     private readonly TextBox _apiId;
     private readonly TextBox _apiHash;
+    private readonly Expander _advanced;
     private readonly TextBox _phone;
     private readonly TextBox _code;
     private readonly TextBox _password;
@@ -47,12 +48,15 @@ internal sealed class TelegramLoginWindow : Window
 
         _intro = new TextBlock { TextWrapping = TextWrapping.Wrap };
         _apiId = new TextBox { PlaceholderText = "API id (a number)", Text = account.ApiId > 0 ? account.ApiId.ToString(CultureInfo.InvariantCulture) : "" };
-        _apiHash = new TextBox { PlaceholderText = "API hash", Text = account.ApiHash };
-        _phone = new TextBox { PlaceholderText = "Phone number with country code (+49…)" };
+        _apiHash = new TextBox { PlaceholderText = "API hash", Text = account.ApiHash, PasswordChar = '•' };
+        _phone = new TextBox { PlaceholderText = "Phone number with country code (+98…)" };
         _phonePanel = new StackPanel { Spacing = 8 };
-        _phonePanel.Children.Add(_apiId);
-        _phonePanel.Children.Add(_apiHash);
         _phonePanel.Children.Add(_phone);
+        var apiFields = new StackPanel { Spacing = 8 };
+        apiFields.Children.Add(new TextBlock { Text = "Use your own API id/hash to override the private defaults. These identify the Telegram application, not your account.", TextWrapping = TextWrapping.Wrap });
+        apiFields.Children.Add(_apiId); apiFields.Children.Add(_apiHash);
+        _advanced = new Expander { Header = "Advanced: Telegram API settings", Content = apiFields, IsExpanded = !account.HasCredentials };
+        _phonePanel.Children.Add(_advanced);
         _code = new TextBox { PlaceholderText = "Login code" };
         _password = new TextBox { PlaceholderText = "Two-step verification password", PasswordChar = '•' };
         _error = new TextBlock { TextWrapping = TextWrapping.Wrap, Foreground = Brushes.IndianRed, IsVisible = false };
@@ -83,6 +87,7 @@ internal sealed class TelegramLoginWindow : Window
         Closed += (_, _) => _closed = true;
 
         Show(account.IsLoggedIn ? Step.LoggedIn : Step.Phone);
+        if (account.DefaultsError.Length > 0) Fail(account.DefaultsError);
     }
 
     private void Show(Step step)
@@ -96,9 +101,9 @@ internal sealed class TelegramLoginWindow : Window
         _next.Content = step == Step.LoggedIn ? "Close" : "Continue";
         _intro.Text = step switch
         {
-            Step.Phone => "The music bot is used through your own Telegram account. Get an API id and hash at "
-                + "my.telegram.org → API development tools, then enter them with your phone number. "
-                + "Only the session Telegram issues is kept, encrypted for your user account on this computer.",
+            Step.Phone => _account.HasCredentials
+                ? "Sign in with your own Telegram phone number. Telegram app settings are already filled in; you can change them under Advanced. Your login session is kept privately on this computer."
+                : "Sign in with your own Telegram account. No private app defaults were supplied. Enter an API id/hash from my.telegram.org → API development tools under Advanced, then your phone number.",
             Step.Code => "Telegram sent a login code to your Telegram app (or by SMS). Enter it here.",
             Step.Password => "This account has two-step verification. Enter its password; it is not stored.",
             _ => $"Logged in as {_account.SignedInAs}.",
@@ -124,17 +129,23 @@ internal sealed class TelegramLoginWindow : Window
                 switch (_step)
                 {
                     case Step.Phone:
-                        var phone = (_phone.Text ?? "").Trim();
+                        var phone = Digits((_phone.Text ?? "").Trim());
                         var hash = (_apiHash.Text ?? "").Trim();
-                        if (!int.TryParse((_apiId.Text ?? "").Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out var id) || hash.Length == 0 || phone.Length == 0)
+                        if (!int.TryParse(Digits((_apiId.Text ?? "").Trim()), NumberStyles.None, CultureInfo.InvariantCulture, out var id) || id <= 0 || !System.Text.RegularExpressions.Regex.IsMatch(hash, "\\A[a-fA-F0-9]{32}\\z"))
                         {
-                            Fail("Enter the API id, the API hash and your phone number.");
+                            _advanced.IsExpanded = true;
+                            Fail("TELEGRAM_API_MISSING: enter a positive API id and a 32-character API hash under Advanced.");
                             return;
                         }
-                        wanted = await _account.StartLoginAsync(id, hash, phone);
+                        if (!phone.StartsWith('+') || phone[1..].Count(char.IsDigit) < 7 || phone[1..].Any(ch => !char.IsDigit(ch) && ch != ' ' && ch != '-'))
+                        {
+                            Fail("PHONE_NUMBER_INVALID: include your country code, for example +98 followed by your number.");
+                            return;
+                        }
+                        wanted = await _account.StartLoginAsync(id, hash, string.Concat(phone.Where(ch => ch == '+' || char.IsDigit(ch))));
                         break;
                     case Step.Code:
-                        wanted = await _account.ContinueLoginAsync((_code.Text ?? "").Trim());
+                        wanted = await _account.ContinueLoginAsync(Digits((_code.Text ?? "").Trim()));
                         break;
                     default:
                         wanted = await _account.ContinueLoginAsync(_password.Text ?? "");
@@ -160,7 +171,8 @@ internal sealed class TelegramLoginWindow : Window
         }
         catch (Exception ex)
         {
-            _host.Log("Telegram login failed: " + ex.Message);
+            _host.Log("Telegram login failed: " + ex.GetType().Name);
+            if (ex.Message.Contains("API_ID", StringComparison.Ordinal) || ex.Message.Contains("API_HASH", StringComparison.Ordinal)) _advanced.IsExpanded = true;
             if (!_closed) Fail(Explain(ex));
         }
     }
@@ -177,8 +189,8 @@ internal sealed class TelegramLoginWindow : Window
         }
         catch (Exception ex)
         {
-            _host.Log("Telegram logout failed: " + ex.Message);
-            if (!_closed) Fail(ex.Message);
+            _host.Log("Telegram logout failed: " + ex.GetType().Name);
+            if (!_closed) Fail(Explain(ex));
         }
     }
 
@@ -196,7 +208,7 @@ internal sealed class TelegramLoginWindow : Window
 
     private static string Explain(Exception ex) => ex is SocketException or IOException or TimeoutException
         // Not an answer from Telegram: the connection itself did not work.
-        ? "Telegram could not be reached (" + ex.Message.TrimEnd('.') + "). Where Telegram is blocked, turn on a VPN "
+        ? "TELEGRAM_CONNECTION_FAILED (" + ex.GetType().Name + "). Telegram could not be reached. Where Telegram is blocked, turn on a VPN "
           + "or its system proxy, or set a proxy in the plugin's settings (Settings → Plugins → Free Music Finder)."
         : Explain(ex.Message);
 
@@ -206,8 +218,10 @@ internal sealed class TelegramLoginWindow : Window
         "PHONE_CODE_EXPIRED" => "That code has expired. Start over to get a new one.",
         "PASSWORD_HASH_INVALID" => "That password is not right.",
         "PHONE_NUMBER_INVALID" => "Telegram does not accept that phone number. Include the country code.",
-        "API_ID_INVALID" => "Telegram does not accept that API id and hash.",
+        "API_ID_INVALID" or "API_HASH_INVALID" or "API_ID_PUBLISHED_FLOOD" => "API_CREDENTIALS_REJECTED: Telegram rejected or restricted the default API id/hash. Open Advanced and enter another valid pair, then try again.",
         _ when error.StartsWith("FLOOD_WAIT", StringComparison.Ordinal) => "Too many attempts. Telegram asks you to wait before trying again.",
-        _ => error,
+        _ => "TELEGRAM_LOGIN_FAILED: " + (System.Text.RegularExpressions.Regex.IsMatch(error, "\\A[A-Z][A-Z0-9_]{2,80}\\z") ? error : "the login could not be completed. Check your connection or try again later."),
     };
+
+    private static string Digits(string value) => string.Concat(value.Select(ch => char.IsDigit(ch) ? (char)('0' + (int)char.GetNumericValue(ch)) : ch));
 }

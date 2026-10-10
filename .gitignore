@@ -3,3 +3,7 @@ obj/
 extern/
 
 .claude/settings.local.json
+**/telegram-defaults.private.json
+private-share/
+**/telegram.dat
+**/telegram.dat.tmp

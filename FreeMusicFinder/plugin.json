@@ -1,7 +1,7 @@
 {
   "id": "dev.moshi.freemusicfinder",
   "name": "Free Music Finder",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "author": "moshi",
   "description": "Search the Telegram music bot @MusicsHuntersbot through your own Telegram account and download tracks into your library. The bot is a third party and is not limited to freely licensed music; what you download through it is your responsibility.",
   "type": "dotnet",

@@ -21,9 +21,10 @@ internal sealed class TelegramAccount : IDisposable
     /// <param name="storePath">The file the login is kept in.</param>
     /// <param name="proxy">The "Proxy" setting as it is now; read whenever a connection is made.</param>
     /// <param name="log">Told which way a connection goes.</param>
-    public TelegramAccount(string storePath, Func<string> proxy, Action<string>? log = null)
+    public TelegramAccount(string storePath, Func<string> proxy, Action<string>? log = null, string? defaultsPath = null)
     {
         _store = new TelegramStore(storePath);
+        _defaults = TelegramDefaults.Read(defaultsPath ?? Path.Combine(Path.GetDirectoryName(storePath)!, "telegram-defaults.private.json"));
         _proxy = proxy;
         _log = log;
     }
@@ -33,8 +34,11 @@ internal sealed class TelegramAccount : IDisposable
     /// <summary>Display name of the signed-in account; empty when logged out.</summary>
     public string SignedInAs => _store.Account;
 
-    public int ApiId => _store.ApiId;
-    public string ApiHash => _store.ApiHash;
+    private readonly TelegramDefaults _defaults;
+    public int ApiId => _store.ApiId > 0 ? _store.ApiId : _defaults.ApiId;
+    public string ApiHash => _store.ApiId > 0 ? _store.ApiHash : _defaults.ApiHash;
+    public bool HasCredentials => ApiId > 0 && ApiHash.Length > 0;
+    public string DefaultsError => _store.ApiId > 0 ? "" : _defaults.Error;
 
     /// <summary>The connected client of the signed-in account.</summary>
     public async Task<Client> ConnectAsync(CancellationToken ct)

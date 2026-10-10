@@ -22,13 +22,18 @@ internal sealed class TelegramStore
         try
         {
             if (!File.Exists(path)) return;
+            var file = new FileInfo(path);
+            if (file.Length > 4 * 1024 * 1024 || (file.Attributes & FileAttributes.ReparsePoint) != 0) throw new InvalidDataException();
             using var reader = new BinaryReader(new MemoryStream(Unprotect(File.ReadAllBytes(path))), Encoding.UTF8);
             ApiId = reader.ReadInt32();
             ApiHash = reader.ReadString();
             Account = reader.ReadString();
-            _session = reader.ReadBytes(reader.ReadInt32());
+            var length = reader.ReadInt32();
+            if (length < 0 || length > 4 * 1024 * 1024) throw new InvalidDataException();
+            _session = reader.ReadBytes(length);
+            if (_session.Length != length) throw new InvalidDataException();
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Win32Exception or EndOfStreamException)
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or Win32Exception or FormatException or ArgumentException)
         {
             // Unreadable (copied from another machine or user, or damaged): start logged out.
             ApiId = 0;
