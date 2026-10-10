@@ -7,3 +7,6 @@ extern/
 private-share/
 **/telegram.dat
 **/telegram.dat.tmp
+**/*.private.json
+work/
+test-artifacts/

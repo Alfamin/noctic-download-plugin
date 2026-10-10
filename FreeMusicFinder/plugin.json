@@ -1,9 +1,9 @@
 {
   "id": "dev.moshi.freemusicfinder",
   "name": "Free Music Finder",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "author": "moshi",
-  "description": "Search the Telegram music bot @MusicsHuntersbot through your own Telegram account and download tracks into your library. The bot is a third party and is not limited to freely licensed music; what you download through it is your responsibility.",
+  "description": "Find music and import full Spotify/Deezer playlists with Music Hunters and DeezLoad, saved queues and automatic fallback. These are third-party bots; what you download is your responsibility.",
   "type": "dotnet",
   "entry": "FreeMusicFinder.dll",
   "apiVersion": "1.1",

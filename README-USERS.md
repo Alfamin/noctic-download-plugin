@@ -1,7 +1,8 @@
 # Free Music Finder — quick start
 
-A Noctis plugin that searches the Telegram bot `@MusicsHuntersbot` through your own Telegram
-account and saves the songs into your Noctis library.
+A Noctis plugin that uses Music Hunters and DeezLoad through your own Telegram account and
+saves songs into your Noctis library. Music Hunters is first for quick searches; playlist
+requests prefer DeezLoad and automatically use Music Hunters when DeezLoad is busy or fails.
 
 You need: Noctis 1.5.3 or newer, a Telegram account, and the file
 [`FreeMusicFinder.zip`](dist/FreeMusicFinder.zip).
@@ -74,13 +75,35 @@ when they are done.
 
 ## Good to know
 
+Paste a Spotify or Deezer playlist/album link in the search box to import it. The complete
+ordered track list is saved before either bot is asked for audio. Existing tracks are skipped;
+remaining recordings are requested individually, so the backup receives only unfinished songs.
+
+- The progress bar counts saved downloads; metadata collection has its own visible status.
+- **Pause queue** pauses after the current request; **Resume queue** continues it.
+- Closing Noctis saves unfinished work and resumes it when Noctis runs again.
+- Bot limits and retry times are tracked separately. When both are unavailable, work waits.
+- Telegram-wide waits affect both bots. Source switching does not avoid that wait.
+- No daily allowance is hard-coded. Without a supplied reset time, the next check is in 24 hours.
+- **Retry failed** retries failed songs and incomplete metadata; completed files stay intact.
+- Matching FLAC recordings are required. Wrong artists, clear version differences, large
+  duration differences and named clean versions of explicit tracks are rejected.
+- Public playlists need no Spotify login. Private/removed/region-blocked metadata is reported;
+  make the link accessible and retry. Truncated previews are refused.
+- Local-file metadata is retained when unambiguous. Ambiguous entries and podcasts stay visible.
+
+The saved queue supports 10,000 requests and retains playlist order/IDs. Catalog filenames have
+a short stable identifier to prevent recording collisions. No ZIP subscription or new Spotify
+playlists are needed. The plugin never makes payments or joins channels automatically.
+
 - **"in your library" under a result:** Noctis already has that song. **Download all** skips
   it; its own **Download** button still works.
 - **Songs do not appear in the library:** check that **Watch Folders** is on in Noctis's
   settings and that Noctis has at least one library folder. If you set your own download
   folder in the plugin's settings, it must be inside a library folder.
 - **Only seven results:** the plugin shows the bot's first page. Make the search more specific.
-- **Downloads are slow or queued:** the bot sends one file at a time.
+- **Downloads are slow or queued:** the plugin tries the other bot, explains waiting and saves
+  unfinished work for later. Bots can have their own queues.
 - **"Retry" on a button:** that download failed; point at the button to see why. "The bot sent
   another file" means the bot answered with something that is not the song you asked for; it
   was not saved.

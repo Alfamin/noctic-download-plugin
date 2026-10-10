@@ -284,6 +284,7 @@ internal sealed class TelegramBotSource
             try { notice = (await client.Messages_GetBotCallbackAnswer(bot, resultsId, button).ConfigureAwait(false))?.message; }
             // The bot may acknowledge the press later than Telegram waits; the file still arrives.
             catch (RpcException ex) when (ex.Message.Contains("TIMEOUT", StringComparison.OrdinalIgnoreCase)) { }
+            if (BotLimits.Read("Music Hunters", notice ?? "", DateTimeOffset.UtcNow) is { } limited) throw limited;
 
             string? other = null;
             var file = await WaitForAsync(client, bot, newest, m =>
@@ -325,6 +326,10 @@ internal sealed class TelegramBotSource
             _account.SessionEnded();
             throw new InvalidOperationException("Telegram ended the session. Log in again.", ex);
         }
+        catch (RpcException ex) when (BotLimits.Read("Music Hunters", ex.Message, DateTimeOffset.UtcNow) is not null)
+        {
+            throw BotLimits.Read("Music Hunters", ex.Message, DateTimeOffset.UtcNow)!;
+        }
     }
 
     /// <summary>
@@ -340,6 +345,8 @@ internal sealed class TelegramBotSource
         {
             ct.ThrowIfCancellationRequested();
             var history = await client.Messages_GetHistory(bot, min_id: afterId, limit: 30).ConfigureAwait(false);
+            foreach (var reply in history.Messages.OfType<Message>().Where(m => !m.flags.HasFlag(Message.Flags.out_)))
+                if (BotLimits.Read("Music Hunters", reply.message ?? "", DateTimeOffset.UtcNow) is { } limited) throw limited;
             var found = history.Messages.OfType<Message>().Reverse()
                 .FirstOrDefault(m => !m.flags.HasFlag(Message.Flags.out_) && matches(m));
             if (found is not null) return found;
@@ -366,7 +373,8 @@ internal sealed class TelegramBotSource
     private static bool IsRequested(BotText.Line wanted, Document sent)
     {
         var audio = sent.attributes?.OfType<DocumentAttributeAudio>().FirstOrDefault();
-        return BotText.IsRequested(wanted, audio?.performer, audio?.title, sent.Filename, (int)(audio?.duration ?? 0));
+        return audio is not null && RecordingMatch.Fits(new MusicRequest(wanted.Title,wanted.Artist,wanted.Duration?.TotalSeconds),
+            audio.performer??"",audio.title??"",audio.duration>0?TimeSpan.FromSeconds(audio.duration):null);
     }
 
     /// <summary>What a file calls itself, for the message that says it was not the one asked for.</summary>

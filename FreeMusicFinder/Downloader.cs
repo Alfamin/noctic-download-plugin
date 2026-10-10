@@ -89,6 +89,8 @@ internal static class Downloader
 
     public static async Task<DownloadOutcome> DownloadAsync(BotTrack track, string folder, IProgress<double>? progress, CancellationToken ct)
     {
+        if(string.IsNullOrWhiteSpace(track.FileName) || Path.IsPathRooted(track.FileName) || track.FileName.IndexOfAny(new[]{'/', '\\',':','\0'})>=0 || track.FileName is "." or "..")
+            throw new InvalidDataException("UNSAFE_FILE_NAME: the provider did not supply a usable name.");
         Directory.CreateDirectory(folder);
         if (FindExisting(folder, track.FileName) is not null) return DownloadOutcome.AlreadyThere;
 
@@ -104,6 +106,20 @@ internal static class Downloader
             }
             if (!AudioExtensions.Contains(extension)) throw new InvalidDataException($"The bot sent a \".{extension}\" file, which is not a song.");
             if (length == 0) throw new InvalidDataException("The bot sent an empty file.");
+            if(track.Request is not null && extension=="flac")
+            {
+                using var audio=File.OpenRead(partial);var header=new byte[10];
+                var read=audio.Read(header,0,header.Length);
+                if(read>=10 && header[0]=='I' && header[1]=='D' && header[2]=='3')
+                {
+                    if(header.Skip(6).Take(4).Any(b=>(b&128)!=0))throw new InvalidDataException("A malformed audio header was received.");
+                    var size=(header[6]<<21)|(header[7]<<14)|(header[8]<<7)|header[9];
+                    if(size>16*1024*1024)throw new InvalidDataException("The audio tag is too large.");
+                    audio.Position=10+size+((header[5]&16)!=0?10:0);read=audio.Read(header,0,4);
+                }
+                if(read<4 || header[0]!='f' || header[1]!='L' || header[2]!='a' || header[3]!='C')
+                    throw new InvalidDataException("INVALID_AUDIO: the file is labelled FLAC but does not have a FLAC header.");
+            }
 
             var target = Path.Combine(folder, track.FileName + "." + extension);
             if (File.Exists(target))

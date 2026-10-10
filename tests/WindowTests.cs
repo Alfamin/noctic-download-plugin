@@ -148,7 +148,7 @@ internal static class WindowTests
 
         gate.SetResult();
         Check.Until(() => Buttons(rows).EndsWith("Downloaded-"), "the running one finishes in view");
-        Check.Until(() => Status(window) == $"Saved \"Third\" to {folder}", "the status says what was saved");
+        Check.Until(() => Status(window) == $"Saved \"Third\" to {Path.GetFullPath(folder)}", "the status says what was saved");
         window.Close();
     }
 
@@ -234,7 +234,7 @@ internal static class WindowTests
         File.SetLastWriteTimeUtc(dead, DateTime.UtcNow.AddHours(-1));
 
         var plugin = new FreeMusicPlugin();
-        Check.Equal("2.4.0", plugin.Info.Version, "the version is the one in plugin.json");
+        Check.Equal("2.5.0", plugin.Info.Version, "the version is the one in plugin.json");
         plugin.Initialize(host);
         Check.Equal("Find more by this artist…", string.Join(",", host.Commands.Select(c => c.Label)), "one track menu entry");
         Check.Until(() => !File.Exists(dead), "what an interrupted download left behind is removed at the start");
@@ -256,7 +256,7 @@ internal static class WindowTests
         var downloads = (Downloads)typeof(FreeMusicPlugin).GetField("_downloads", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(plugin)!;
         downloads.Start(LogicTests.Track("Announced"), folder);
         Check.Until(() => host.Notices.Count == 1, "a finished download gives one notice in Noctis");
-        Check.Equal($"Saved \"Announced\" to {folder}", host.Notices.FirstOrDefault(), "which says what was saved and where");
+        Check.Equal($"Saved \"Announced\" to {Path.GetFullPath(folder)}", host.Notices.FirstOrDefault(), "which says what was saved and where");
         host.Raise("openSearch");
         window = Window();
         Check.True(window is { IsVisible: true }, "the window opens again after it was closed");
@@ -318,7 +318,7 @@ internal static class WindowTests
 
     private static List<RowView> Rows(SearchWindow window)
     {
-        var panel = (StackPanel)((ScrollViewer)Root(window).Children[1]).Content!;
+        var panel = (StackPanel)((ScrollViewer)Root(window).Children[2]).Content!;
         return panel.Children.Cast<Grid>().Select(row =>
         {
             var text = (StackPanel)row.Children[0];
@@ -329,11 +329,11 @@ internal static class WindowTests
     /// <summary>Each row's button: its label, then "+" when it can be pressed and "-" when not.</summary>
     private static string Buttons(IEnumerable<RowView> rows) => string.Join(" ", rows.Select(r => r.Button.Content + (r.Button.IsEnabled ? "+" : "-")));
 
-    private static string Status(SearchWindow window) => ((Grid)Root(window).Children[2]).Children.OfType<TextBlock>().First().Text ?? "";
+    private static string Status(SearchWindow window) => ((Grid)Root(window).Children[3]).Children.OfType<TextBlock>().First().Text ?? "";
 
-    private static Button DownloadAll(SearchWindow window) => ((Grid)Root(window).Children[2]).Children.OfType<Button>().First(b => "Download all".Equals(b.Content));
+    private static Button DownloadAll(SearchWindow window) => ((Grid)Root(window).Children[3]).Children.OfType<Button>().First(b => "Download all".Equals(b.Content));
 
-    private static Button TelegramButton(SearchWindow window) => ((Grid)Root(window).Children[2]).Children.OfType<Button>().First();
+    private static Button TelegramButton(SearchWindow window) => ((Grid)Root(window).Children[3]).Children.OfType<Button>().First();
 
     private static Button SearchButton(SearchWindow window) => ((Grid)Root(window).Children[0]).Children.OfType<Button>().First();
 

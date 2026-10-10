@@ -5,7 +5,10 @@ using System.Text.RegularExpressions;
 namespace FreeMusicFinder;
 
 /// <summary>One track the bot listed. <paramref name="FileName"/> is the name it is saved under, without the extension; <paramref name="Fetch"/> downloads it.</summary>
-internal sealed record BotTrack(string Title, string Artist, TimeSpan? Duration, string FileName, TrackFetch Fetch);
+internal sealed record BotTrack(string Title, string Artist, TimeSpan? Duration, string FileName, TrackFetch Fetch)
+{
+    public MusicRequest? Request { get; init; }
+}
 
 /// <summary>Writes a track's audio to <paramref name="output"/> and returns its file extension ("flac").</summary>
 internal delegate Task<string> TrackFetch(Stream output, IProgress<double>? progress, CancellationToken ct);

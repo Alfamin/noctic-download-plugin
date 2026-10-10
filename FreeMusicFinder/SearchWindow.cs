@@ -35,15 +35,21 @@ internal sealed class SearchWindow : Window
     private readonly Button _telegramButton;
     private readonly StackPanel _results;
     private readonly TextBlock _status;
+    private readonly PlaylistTransfers? _transfers;
+    private readonly TextBlock _queueStatus;
+    private readonly ProgressBar _queueProgress;
+    private readonly Button _pauseButton;
+    private readonly DispatcherTimer _queueTimer;
 
     /// <param name="searchBot">Asks the bot for the tracks that match a text.</param>
     public SearchWindow(IPluginHost host, TelegramAccount telegram, Downloads downloads,
-        Func<string, CancellationToken, Task<IReadOnlyList<BotTrack>>> searchBot)
+        Func<string, CancellationToken, Task<IReadOnlyList<BotTrack>>> searchBot,PlaylistTransfers? transfers=null)
     {
         _host = host;
         _telegram = telegram;
         _downloads = downloads;
         _searchBot = searchBot;
+        _transfers=transfers;
 
         Title = "Free Music Finder";
         Width = 760;
@@ -52,7 +58,7 @@ internal sealed class SearchWindow : Window
         MinHeight = 320;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
-        _query = new TextBox { PlaceholderText = "Artist and title" };
+        _query = new TextBox { PlaceholderText = "Search artist/title, or paste a Spotify or Deezer link" };
         _query.KeyDown += (_, e) =>
         {
             if (e.Key != Key.Enter) return;
@@ -74,7 +80,7 @@ internal sealed class SearchWindow : Window
         _status = new TextBlock
         {
             VerticalAlignment = VerticalAlignment.Center,
-            TextTrimming = TextTrimming.CharacterEllipsis,
+            TextWrapping = TextWrapping.Wrap,
             Opacity = 0.7,
         };
         // The line is cut off when it does not fit; pointing at it shows all of it.
@@ -89,26 +95,36 @@ internal sealed class SearchWindow : Window
         var openFolder = new Button { Content = "Open folder", Margin = new Thickness(8, 0, 0, 0) };
         openFolder.Click += (_, _) => OpenFolder();
 
-        var bottom = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto") };
+        var bottom = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"),RowDefinitions=new RowDefinitions("Auto,Auto") };
+        Grid.SetColumnSpan(_status,3);
         bottom.Children.Add(_status);
-        Grid.SetColumn(_telegramButton, 1);
+        Grid.SetRow(_telegramButton,1);
         bottom.Children.Add(_telegramButton);
-        Grid.SetColumn(_downloadAllButton, 2);
+        Grid.SetRow(_downloadAllButton,1);Grid.SetColumn(_downloadAllButton, 1);
         bottom.Children.Add(_downloadAllButton);
-        Grid.SetColumn(openFolder, 3);
+        Grid.SetRow(openFolder,1);Grid.SetColumn(openFolder, 2);
         bottom.Children.Add(openFolder);
 
-        var root = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto"), Margin = new Thickness(16) };
+        _queueStatus=new TextBlock {TextWrapping=TextWrapping.Wrap,Opacity=0.8,Margin=new Thickness(0,8,0,4)};
+        _queueProgress=new ProgressBar {Minimum=0,Maximum=100,Height=5,Margin=new Thickness(0,0,0,8)};
+        _pauseButton=new Button {Content=_downloads.Paused?"Resume queue":"Pause queue"};
+        _pauseButton.Click+=(_,_)=>{try {_downloads.SetPaused(!_downloads.Paused);ShowQueue();}catch(Exception ex){_status.Text="Could not save queue: "+ex.Message;}};
+        var retry=new Button {Content="Retry failed",Margin=new Thickness(8,0,0,0)};
+        retry.Click+=(_,_)=>{try {_downloads.RetryFailed();_transfers?.RetryIncomplete();ShowQueue();}catch(Exception ex){_status.Text="Could not retry: "+ex.Message;}};
+        var queueButtons=new StackPanel {Orientation=Orientation.Horizontal};queueButtons.Children.Add(_pauseButton);queueButtons.Children.Add(retry);
+        var queuePanel=new StackPanel();queuePanel.Children.Add(_queueStatus);queuePanel.Children.Add(_queueProgress);queuePanel.Children.Add(queueButtons);
+        var root = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto"), Margin = new Thickness(16) };
         root.Children.Add(top);
-        Grid.SetRow(scroller, 1);
+        Grid.SetRow(queuePanel,1);root.Children.Add(queuePanel);
+        Grid.SetRow(scroller, 2);
         root.Children.Add(scroller);
-        Grid.SetRow(bottom, 2);
+        Grid.SetRow(bottom, 3);
         root.Children.Add(bottom);
         Content = root;
 
         ShowTelegramState();
         _status.Text = _telegram.IsLoggedIn
-            ? $"Searches the Telegram bot @{TelegramBotSource.Bot} through your Telegram account."
+            ? "Music Hunters for quick searches; DeezLoad for batch imports. Automatic backup is enabled."
             : LoginFirst;
 
         // Downloads started before the window was last closed are still going.
@@ -117,11 +133,15 @@ internal sealed class SearchWindow : Window
 
         _downloads.Changed += OnDownloadChanged;
         _downloads.Finished += OnDownloadsFinished;
+        if(_transfers is not null) _transfers.Changed+=OnTransferChanged;
+        _queueTimer=new DispatcherTimer {Interval=TimeSpan.FromSeconds(1)};_queueTimer.Tick+=(_,_)=>ShowQueue();_queueTimer.Start();ShowQueue();
         Opened += (_, _) => _query.Focus();
         Closed += (_, _) =>
         {
             _downloads.Changed -= OnDownloadChanged;
             _downloads.Finished -= OnDownloadsFinished;
+            if(_transfers is not null) _transfers.Changed-=OnTransferChanged;
+            _queueTimer.Stop();
             _closed.Cancel();
             _search?.Cancel();
         };
@@ -182,7 +202,7 @@ internal sealed class SearchWindow : Window
             _defaultFolder = null; // looked up again per search: the library folders may have changed
             _search?.Cancel();
             var search = _search = CancellationTokenSource.CreateLinkedTokenSource(_closed.Token);
-            search.CancelAfter(TimeSpan.FromSeconds(25));
+            search.CancelAfter(_downloads.Active.Any(d=>d.State==DownloadState.Running)?TimeSpan.FromMinutes(20):TimeSpan.FromSeconds(30));
             var ct = search.Token;
 
             _rows.Clear();
@@ -194,9 +214,15 @@ internal sealed class SearchWindow : Window
                 _status.Text = LoginFirst;
                 return;
             }
+            if(_transfers is not null && MusicLink.TryParse(query,out var musicLink))
+            {
+                var job=_transfers.Start(musicLink!.Url,DownloadFolder);
+                _status.Text=job.Status;ShowRunningDownloads();ShowQueue();return;
+            }
+            if(Uri.TryCreate(query,UriKind.Absolute,out _)) { _status.Text="Use a full Spotify or Deezer track, album or playlist link. Other links are not opened.";return; }
 
             _searchButton.IsEnabled = false;
-            _status.Text = "Searching…";
+            _status.Text = _downloads.Active.Any(d=>d.State==DownloadState.Running)?"Waiting for the current download, then searching…":"Searching…";
             try
             {
                 // Task.Run keeps the waiting on the bot off the UI thread.
@@ -234,7 +260,7 @@ internal sealed class SearchWindow : Window
     /// <summary>Adds a row for every waiting or running download that has none: they stay in view across searches.</summary>
     private void ShowRunningDownloads()
     {
-        foreach (var download in _downloads.Active)
+        foreach (var download in _downloads.Active.Take(250))
             if (_rows.All(r => r.Download != download))
                 AddRow(download.Track, download);
     }
@@ -311,6 +337,7 @@ internal sealed class SearchWindow : Window
             if (!row.CanStart) return;
             row.Download = _downloads.Start(row.Track, DownloadFolder);
             row.Show();
+            ShowQueue();
             ShowDownloadAll();
         }
         catch (Exception ex)
@@ -328,7 +355,9 @@ internal sealed class SearchWindow : Window
             if (_closed.IsCancellationRequested) return;
             try
             {
+                if(_transfers is not null && _rows.Count<250 && _rows.All(r=>r.Download!=download)) AddRow(download.Track,download);
                 foreach (var row in _rows.Where(r => r.Download == download)) row.Show();
+                ShowQueue();
                 if (download.State == DownloadState.Failed) _status.Text = $"Could not download \"{download.Track.Title}\": {download.Error}";
                 if (!download.IsActive) ShowDownloadAll();
             }
@@ -344,6 +373,20 @@ internal sealed class SearchWindow : Window
         {
             if (!_closed.IsCancellationRequested) _status.Text = summary;
         });
+
+    private void OnTransferChanged(string text)=>Dispatcher.UIThread.Post(()=>{if(!_closed.IsCancellationRequested){_status.Text=text;ShowQueue();}});
+    private void ShowQueue()
+    {
+        var all=_downloads.History;var done=all.Count(d=>d.State is DownloadState.Saved or DownloadState.AlreadyThere);
+        var pending=all.Count(d=>d.IsActive);var failed=all.Count(d=>d.State==DownloadState.Failed);
+        var waiting=all.Where(d=>d.State==DownloadState.Waiting).ToArray();
+        _queueStatus.Text=all.Count==0?"Paste a playlist link to start a saved import.":$"{done} saved / {all.Count} queued · {pending} pending · {failed} need retry";
+        if(waiting.Length>0 && waiting.Min(d=>d.RetryAt) is {} retry) _queueStatus.Text+=$" · next check {retry.ToLocalTime():ddd HH:mm}";
+        if(_downloads.Paused) _queueStatus.Text+=" · paused after the current request";
+        if(_transfers?.Jobs.Count(j=>!j.Complete)>0) _queueStatus.Text+=" · playlist collection continues";
+        _queueProgress.Value=all.Count>0?100.0*done/all.Count:0;
+        _pauseButton.Content=_downloads.Paused?"Resume queue":"Pause queue";
+    }
 
     private void OpenFolder()
     {
@@ -389,6 +432,7 @@ internal sealed class SearchWindow : Window
             Button.Content = OnDisk ? "Downloaded" : state switch
             {
                 DownloadState.Queued => "Queued",
+                DownloadState.Waiting => "Waiting for provider",
                 DownloadState.Running => Download!.Progress > 0 ? $"{Download.Progress:P0}" : "Starting…",
                 DownloadState.Saved => "Downloaded",
                 DownloadState.AlreadyThere => "Already saved",
@@ -396,7 +440,7 @@ internal sealed class SearchWindow : Window
                 _ => "Download",
             };
             Button.IsEnabled = CanStart;
-            ToolTip.SetTip(Button, state == DownloadState.Failed ? Download!.Error : null);
+            ToolTip.SetTip(Button, state is DownloadState.Failed or DownloadState.Waiting ? Download!.Error : null);
         }
     }
 }

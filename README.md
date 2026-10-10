@@ -1,7 +1,12 @@
 # Free Music Finder — a Noctis plugin
 
-Searches the Telegram music bot `@MusicsHuntersbot` through your own Telegram account and
-downloads tracks into your library, from inside [Noctis](https://github.com/heartached/Noctis).
+Finds songs and imports Spotify/Deezer playlists through Music Hunters and DeezLoad using
+your own Telegram account, from inside [Noctis](https://github.com/heartached/Noctis).
+
+Version 2.5 adds full metadata manifests, individual source fallback, durable queues across
+restarts, independent bot cooldowns and a visible progress/pause panel. Music Hunters handles
+quick searches first; playlist requests prefer DeezLoad when available. See
+[user instructions](README-USERS.md#good-to-know).
 
 Know what this is before you use it:
 
@@ -41,8 +46,8 @@ the file.
   They can still be downloaded one by one; **Download all** leaves them out.
 - Downloads run one at a time, in the order you asked for them: the bot sends one file at a
   time. They belong to the plugin, not to the window: closing the window does not stop them, and
-  opening it again shows the ones still going. They stop when the plugin is switched off or
-  Noctis is closed.
+  opening it again shows the ones still going. Unfinished work is saved when the plugin or
+  Noctis closes, and resumes when it is running again.
 - Only the file that was asked for is saved. The bot answers everything in one chat, so a file
   can arrive that belongs to an earlier request or is something else altogether; it is told
   apart by its name and length and left alone. Files that are not songs are never saved.

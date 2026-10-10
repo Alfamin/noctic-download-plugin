@@ -25,7 +25,8 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     private readonly List<IDisposable> _registrations = new();
     private IPluginHost? _host;
     private TelegramAccount? _telegram;
-    private TelegramBotSource? _bot;
+    private MusicSources? _bot;
+    private PlaylistTransfers? _transfers;
     private Downloads? _downloads;
     private SearchWindow? _window;
     private KeyGesture? _shortcut;
@@ -38,15 +39,19 @@ public sealed class FreeMusicPlugin : INoctisPlugin
         // The version is written once, in plugin.json; the build gives it to the assembly.
         Version: typeof(FreeMusicPlugin).Assembly.GetName().Version?.ToString(3) ?? "0.0.0",
         Author: "moshi",
-        Description: "Search the Telegram music bot @MusicsHuntersbot through your own Telegram account and download tracks into your library.");
+        Description: "Find songs and import Spotify/Deezer playlists with Music Hunters and DeezLoad, with saved queues and automatic fallback.");
 
     public void Initialize(IPluginHost host)
     {
         _host = host;
         _proxy = host.Settings.GetString(ProxyKey) ?? "";
         _telegram = new TelegramAccount(Path.Combine(host.DataDirectory, "telegram.dat"), () => _proxy, Log);
-        _bot = new TelegramBotSource(_telegram, Log);
-        _downloads = new Downloads(Log);
+        _bot = new MusicSources(new HunterMusicSource(_telegram,Log),new DeezLoadSource(_telegram,Announce),Announce,
+            Path.Combine(host.DataDirectory,"source-limits.json"));
+        _downloads = new Downloads(Log,Path.Combine(host.DataDirectory,"download-queue.json"),_bot.Track);
+        _transfers = new PlaylistTransfers(_telegram,_bot,_downloads,Path.Combine(host.DataDirectory,"playlist-queue.json"),Owns,
+            new PlaylistCatalog(PlaylistCatalog.MetadataHandler(_proxy)));
+        _transfers.Changed += Announce;
         _downloads.Finished += Announce;
 
         _registrations.Add(host.RegisterTrackCommand(
@@ -85,6 +90,8 @@ public sealed class FreeMusicPlugin : INoctisPlugin
         if (_downloads is not null) _downloads.Finished -= Announce;
         _downloads?.Dispose();
         _downloads = null;
+        if(_transfers is not null) _transfers.Changed -= Announce;
+        _transfers?.Dispose(); _transfers=null;
         _bot = null;
         _telegram?.Dispose();
         _telegram = null;
@@ -94,7 +101,11 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     private void OnSettingChanged(object? sender, string key)
     {
         if (key == OpenSearchKey) ShowWindow(null);
-        else if (key == ProxyKey) _proxy = _host?.Settings.GetString(ProxyKey) ?? "";
+        else if (key == ProxyKey)
+        {
+            _proxy = _host?.Settings.GetString(ProxyKey) ?? "";
+            try{_transfers?.UpdateProxy(_proxy);}catch(Exception ex){Announce("Metadata proxy: "+ex.Message);}
+        }
         else if (key == ShortcutKey) ApplyShortcut();
     }
 
@@ -127,7 +138,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
         {
             if (_window is null)
             {
-                _window = new SearchWindow(_host, _telegram, _downloads, _bot.SearchAsync);
+                _window = new SearchWindow(_host, _telegram, _downloads, _bot.SearchAsync,_transfers);
                 _window.Closed += (_, _) => _window = null;
 
                 var owner = (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.MainWindow;
@@ -148,6 +159,16 @@ public sealed class FreeMusicPlugin : INoctisPlugin
             // An exception out of a callback marks the plugin Failed; a window that will not open is not worth that.
             _host.Log("could not open the search window: " + ex.Message);
         }
+    }
+
+    private bool Owns(BotTrack track)
+    {
+        try
+        {
+            return Dispatcher.UIThread.InvokeAsync(()=>_host?.Library.Search(BotText.Plain(track.Title),100)
+                .Any(t=>File.Exists(t.FilePath) && RecordingMatch.Fits(new MusicRequest(track.Title,track.Artist,track.Duration?.TotalSeconds),t.Artist,t.Title,t.Duration))??false).GetAwaiter().GetResult();
+        }
+        catch(Exception ex) {Log("Could not check existing library: "+ex.Message);return false;}
     }
 
     /// <summary>Tells the user what was saved. Called from the download thread.</summary>
