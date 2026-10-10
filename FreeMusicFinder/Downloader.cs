@@ -121,6 +121,7 @@ internal static class Downloader
                     throw new InvalidDataException("INVALID_AUDIO: the file is labelled FLAC but does not have a FLAC header.");
             }
 
+            ct.ThrowIfCancellationRequested();
             var target = Path.Combine(folder, track.FileName + "." + extension);
             if (File.Exists(target))
             {

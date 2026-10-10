@@ -66,7 +66,15 @@ Your phone number, login code and two-step password are never filled in by someo
 ## 5. Search and download
 
 1. Type an artist and title and press Enter.
-2. Press **Download** on a result, or **Download all**.
+2. Press **Download now** to put that song ahead of the backlog, or **Add to queue** to download it later. **Queue all** adds the search results to the batch.
+
+**Download now** works while the batch is paused. A file already transferring finishes first;
+bot limits still apply. Search results and saved requests have separate **Search** and **Queue** tabs.
+In **Queue**, find a song by artist/title, press **Remove** to cancel that request, or
+**Download now** to prioritise it. **Clear queue…** asks for confirmation, stops the current
+transfer and playlist imports, and erases the saved requests/history. Downloaded files stay on disk.
+The queue has pages, so requests beyond the first 100 remain accessible. Removed songs stay removed
+after restarting Noctis. You can deliberately add them again later.
 
 Songs are saved as `Artist - Title.ext` in a `Noctis Free Music` folder inside your first Noctis
 library folder and appear in the library a moment later. **Open folder** shows where they are.
@@ -80,7 +88,7 @@ ordered track list is saved before either bot is asked for audio. Existing track
 remaining recordings are requested individually, so the backup receives only unfinished songs.
 
 - The progress bar counts saved downloads; metadata collection has its own visible status.
-- **Pause queue** pauses after the current request; **Resume queue** continues it.
+- **Pause queue** pauses batch work after the current request; **Download now** still works. **Resume queue** continues the batch.
 - Closing Noctis saves unfinished work and resumes it when Noctis runs again.
 - Bot limits and retry times are tracked separately. When both are unavailable, work waits.
 - Telegram-wide waits affect both bots. Source switching does not avoid that wait.
@@ -96,8 +104,8 @@ The saved queue supports 10,000 requests and retains playlist order/IDs. Catalog
 a short stable identifier to prevent recording collisions. No ZIP subscription or new Spotify
 playlists are needed. The plugin never makes payments or joins channels automatically.
 
-- **"in your library" under a result:** Noctis already has that song. **Download all** skips
-  it; its own **Download** button still works.
+- **"in your library" under a result:** Noctis already has that song. **Queue all** skips
+  it; its own **Download now** button still works.
 - **Songs do not appear in the library:** check that **Watch Folders** is on in Noctis's
   settings and that Noctis has at least one library folder. If you set your own download
   folder in the plugin's settings, it must be inside a library folder.

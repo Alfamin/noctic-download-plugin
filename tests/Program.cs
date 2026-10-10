@@ -9,6 +9,7 @@ try
 {
     await LogicTests.RunAsync();
     await TransferTests.RunAsync();
+    await QueueManagementTests.RunAsync();
 
     var pictures = Environment.GetEnvironmentVariable("FMF_PICTURES");
     var app = AppBuilder.Configure<TestApp>();

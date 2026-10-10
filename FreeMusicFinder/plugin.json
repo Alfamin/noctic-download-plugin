@@ -1,7 +1,7 @@
 {
   "id": "dev.moshi.freemusicfinder",
   "name": "Free Music Finder",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "author": "moshi",
   "description": "Find music and import full Spotify/Deezer playlists with Music Hunters and DeezLoad, saved queues and automatic fallback. These are third-party bots; what you download is your responsibility.",
   "type": "dotnet",

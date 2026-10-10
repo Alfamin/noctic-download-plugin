@@ -170,9 +170,16 @@ internal static class AtomicJson
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new IOException("Refusing a redirected queue file.");
         var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-        { JsonSerializer.Serialize(stream, value); stream.Flush(true); }
-        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(temp, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        File.Move(temp, path, overwrite: true);
+        try
+        {
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            { JsonSerializer.Serialize(stream, value); stream.Flush(true); }
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(temp, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            File.Move(temp, path, overwrite: true);
+        }
+        finally
+        {
+            try {File.Delete(temp);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){}
+        }
     }
 }

@@ -40,6 +40,9 @@ internal sealed class SearchWindow : Window
     private readonly ProgressBar _queueProgress;
     private readonly Button _pauseButton;
     private readonly DispatcherTimer _queueTimer;
+    private readonly TabControl _tabs;
+    private readonly TabItem _queueTab;
+    private readonly QueueView _queueView;
 
     /// <param name="searchBot">Asks the bot for the tracks that match a text.</param>
     public SearchWindow(IPluginHost host, TelegramAccount telegram, Downloads downloads,
@@ -90,7 +93,7 @@ internal sealed class SearchWindow : Window
         };
         _telegramButton = new Button { Margin = new Thickness(8, 0, 0, 0) };
         _telegramButton.Click += (_, _) => OpenTelegramLogin();
-        _downloadAllButton = new Button { Content = "Download all", IsEnabled = false, Margin = new Thickness(8, 0, 0, 0) };
+        _downloadAllButton = new Button { Content = "Queue all", IsEnabled = false, Margin = new Thickness(8, 0, 0, 0) };
         _downloadAllButton.Click += (_, _) => DownloadAll();
         var openFolder = new Button { Content = "Open folder", Margin = new Thickness(8, 0, 0, 0) };
         openFolder.Click += (_, _) => OpenFolder();
@@ -111,13 +114,23 @@ internal sealed class SearchWindow : Window
         _pauseButton.Click+=(_,_)=>{try {_downloads.SetPaused(!_downloads.Paused);ShowQueue();}catch(Exception ex){_status.Text="Could not save queue: "+ex.Message;}};
         var retry=new Button {Content="Retry failed",Margin=new Thickness(8,0,0,0)};
         retry.Click+=(_,_)=>{try {_downloads.RetryFailed();_transfers?.RetryIncomplete();ShowQueue();}catch(Exception ex){_status.Text="Could not retry: "+ex.Message;}};
-        var queueButtons=new StackPanel {Orientation=Orientation.Horizontal};queueButtons.Children.Add(_pauseButton);queueButtons.Children.Add(retry);
+        var manage=new Button {Content="Manage queue",Margin=new Thickness(8,0,0,0)};
+        manage.Click+=(_,_)=>_tabs!.SelectedIndex=1;
+        var queueButtons=new StackPanel {Orientation=Orientation.Horizontal};queueButtons.Children.Add(_pauseButton);queueButtons.Children.Add(retry);queueButtons.Children.Add(manage);
         var queuePanel=new StackPanel();queuePanel.Children.Add(_queueStatus);queuePanel.Children.Add(_queueProgress);queuePanel.Children.Add(queueButtons);
+        _queueView=new QueueView(_downloads,()=>
+        {
+            // Stop the producer first, including any metadata request already in flight.
+            _transfers?.Clear();_downloads.Clear();
+            _status.Text="Queue cleared. Downloaded files were kept.";ShowQueue();
+        },text=>_status.Text=text);
+        _queueTab=new TabItem {Header="Queue",Content=_queueView};
+        _tabs=new TabControl {ItemsSource=new[] {new TabItem {Header="Search",Content=scroller},_queueTab}};
         var root = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto"), Margin = new Thickness(16) };
         root.Children.Add(top);
         Grid.SetRow(queuePanel,1);root.Children.Add(queuePanel);
-        Grid.SetRow(scroller, 2);
-        root.Children.Add(scroller);
+        Grid.SetRow(_tabs, 2);
+        root.Children.Add(_tabs);
         Grid.SetRow(bottom, 3);
         root.Children.Add(bottom);
         Content = root;
@@ -128,8 +141,7 @@ internal sealed class SearchWindow : Window
             : LoginFirst;
 
         // Downloads started before the window was last closed are still going.
-        ShowRunningDownloads();
-        if (_rows.Count > 0) _status.Text = $"{_rows.Count} download{(_rows.Count == 1 ? " is" : "s are")} still going.";
+        if (_downloads.Active.Count > 0) _status.Text = $"{_downloads.Active.Count} pending requests saved in the Queue tab.";
 
         _downloads.Changed += OnDownloadChanged;
         _downloads.Finished += OnDownloadsFinished;
@@ -205,19 +217,19 @@ internal sealed class SearchWindow : Window
             search.CancelAfter(_downloads.Active.Any(d=>d.State==DownloadState.Running)?TimeSpan.FromMinutes(20):TimeSpan.FromSeconds(30));
             var ct = search.Token;
 
+            _tabs.SelectedIndex=0;
             _rows.Clear();
             _results.Children.Clear();
             _downloadAllButton.IsEnabled = false;
             if (!_telegram.IsLoggedIn)
             {
-                ShowRunningDownloads();
                 _status.Text = LoginFirst;
                 return;
             }
             if(_transfers is not null && MusicLink.TryParse(query,out var musicLink))
             {
                 var job=_transfers.Start(musicLink!.Url,DownloadFolder);
-                _status.Text=job.Status;ShowRunningDownloads();ShowQueue();return;
+                _status.Text=job.Status;_tabs.SelectedIndex=1;ShowQueue();return;
             }
             if(Uri.TryCreate(query,UriKind.Absolute,out _)) { _status.Text="Use a full Spotify or Deezer track, album or playlist link. Other links are not opened.";return; }
 
@@ -244,7 +256,6 @@ internal sealed class SearchWindow : Window
                     : "Search failed: " + ex.Message;
             }
 
-            ShowRunningDownloads();
             _searchButton.IsEnabled = true;
             ShowDownloadAll();
             ShowTelegramState(); // a search can find out that Telegram ended the session
@@ -255,14 +266,6 @@ internal sealed class SearchWindow : Window
             _searchButton.IsEnabled = true;
             _status.Text = "Search failed: " + ex.Message;
         }
-    }
-
-    /// <summary>Adds a row for every waiting or running download that has none: they stay in view across searches.</summary>
-    private void ShowRunningDownloads()
-    {
-        foreach (var download in _downloads.Active.Take(250))
-            if (_rows.All(r => r.Download != download))
-                AddRow(download.Track, download);
     }
 
     private void AddRow(BotTrack track, Download? download = null)
@@ -276,7 +279,10 @@ internal sealed class SearchWindow : Window
         };
         row.InLibrary = !row.OnDisk && row.Download is null && InLibrary(track);
         row.Show();
-        button.Click += (_, _) => Download(row);
+        button.Click += (_, _) => Download(row,true);
+        var queueButton=new Button {Content="Add to queue",Margin=new Thickness(6,0,0,0),VerticalAlignment=VerticalAlignment.Center};
+        queueButton.Click+=(_,_)=>Download(row,false);
+        row.QueueButton=queueButton;row.Show();
 
         var title = new TextBlock { Text = track.Title, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis };
         var details = track.Artist;
@@ -287,10 +293,11 @@ internal sealed class SearchWindow : Window
         text.Children.Add(title);
         text.Children.Add(subtitle);
 
-        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(4, 6) };
+        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), Margin = new Thickness(4, 6) };
         grid.Children.Add(text);
         Grid.SetColumn(button, 1);
         grid.Children.Add(button);
+        Grid.SetColumn(queueButton,2);grid.Children.Add(queueButton);
 
         _rows.Add(row);
         _results.Children.Add(grid);
@@ -322,7 +329,7 @@ internal sealed class SearchWindow : Window
     {
         try
         {
-            foreach (var row in _rows.Where(r => r.CanStart && !r.InLibrary).ToList()) Download(row);
+            foreach (var row in _rows.Where(r => r.CanStart && !r.InLibrary).ToList()) Download(row,false);
         }
         catch (Exception ex)
         {
@@ -330,12 +337,15 @@ internal sealed class SearchWindow : Window
         }
     }
 
-    private void Download(Row row)
+    private void Download(Row row,bool priority)
     {
         try
         {
-            if (!row.CanStart) return;
-            row.Download = _downloads.Start(row.Track, DownloadFolder);
+            if (!row.CanStart && !(priority && row.Download is {IsActive:true,State:not DownloadState.Running})) return;
+            row.Download = _downloads.Start(row.Track, row.Download?.Folder??DownloadFolder,priority);
+            _status.Text=priority && row.Download.RetryAt>DateTimeOffset.UtcNow
+                ?$"Priority saved. Provider is unavailable until {row.Download.RetryAt.Value.ToLocalTime():ddd HH:mm}."
+                :priority?"Downloading next, after any current transfer. Provider limits still apply.":"Added to the saved queue.";
             row.Show();
             ShowQueue();
             ShowDownloadAll();
@@ -343,6 +353,7 @@ internal sealed class SearchWindow : Window
         catch (Exception ex)
         {
             _host.Log("download failed: " + ex.Message);
+            _status.Text="Could not queue download: "+ex.Message;
         }
     }
 
@@ -355,7 +366,6 @@ internal sealed class SearchWindow : Window
             if (_closed.IsCancellationRequested) return;
             try
             {
-                if(_transfers is not null && _rows.Count<250 && _rows.All(r=>r.Download!=download)) AddRow(download.Track,download);
                 foreach (var row in _rows.Where(r => r.Download == download)) row.Show();
                 ShowQueue();
                 if (download.State == DownloadState.Failed) _status.Text = $"Could not download \"{download.Track.Title}\": {download.Error}";
@@ -386,6 +396,8 @@ internal sealed class SearchWindow : Window
         if(_transfers?.Jobs.Count(j=>!j.Complete)>0) _queueStatus.Text+=" · playlist collection continues";
         _queueProgress.Value=all.Count>0?100.0*done/all.Count:0;
         _pauseButton.Content=_downloads.Paused?"Resume queue":"Pause queue";
+        _queueTab.Header=$"Queue ({pending+failed})";
+        _queueView.Refresh();
     }
 
     private void OpenFolder()
@@ -413,6 +425,7 @@ internal sealed class SearchWindow : Window
 
         public BotTrack Track { get; }
         public Button Button { get; }
+        public Button? QueueButton {get;set;}
 
         /// <summary>The track's download, once one was asked for.</summary>
         public Download? Download { get; set; }
@@ -423,7 +436,7 @@ internal sealed class SearchWindow : Window
         /// <summary>The Noctis library has this song; it can still be downloaded, but "Download all" leaves it out.</summary>
         public bool InLibrary { get; set; }
 
-        public bool CanStart => !OnDisk && Download?.State is null or DownloadState.Failed or DownloadState.Cancelled;
+        public bool CanStart => !OnDisk && Download?.State is null or DownloadState.Failed or DownloadState.Cancelled or DownloadState.Removed;
 
         /// <summary>Puts the state of the download on the button.</summary>
         public void Show()
@@ -431,15 +444,20 @@ internal sealed class SearchWindow : Window
             var state = Download?.State;
             Button.Content = OnDisk ? "Downloaded" : state switch
             {
-                DownloadState.Queued => "Queued",
-                DownloadState.Waiting => "Waiting for provider",
+                DownloadState.Queued => Download!.Priority?"Next in line":"Download now",
+                DownloadState.Waiting => Download!.Priority?"Waiting for provider":"Download now",
                 DownloadState.Running => Download!.Progress > 0 ? $"{Download.Progress:P0}" : "Starting…",
                 DownloadState.Saved => "Downloaded",
                 DownloadState.AlreadyThere => "Already saved",
                 DownloadState.Failed => "Retry",
-                _ => "Download",
+                _ => "Download now",
             };
-            Button.IsEnabled = CanStart;
+            Button.IsEnabled = CanStart || Download is {State:DownloadState.Queued or DownloadState.Waiting,Priority:false};
+            if(QueueButton is not null)
+            {
+                QueueButton.IsEnabled=CanStart;
+                QueueButton.Content=Download?.IsActive==true?"Queued":"Add to queue";
+            }
             ToolTip.SetTip(Button, state is DownloadState.Failed or DownloadState.Waiting ? Download!.Error : null);
         }
     }

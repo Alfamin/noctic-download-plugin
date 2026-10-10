@@ -26,6 +26,7 @@ internal sealed class PlaylistTransfers : IDisposable
     private readonly List<PlaylistCatalog> _retiredCatalogs=new();
     private int _networkVersion;
     private readonly CancellationTokenSource _stop = new();
+    private CancellationTokenSource _importsStop = new();
     private readonly List<PlaylistTransfer> _jobs;
     private readonly object _gate=new();
     public event Action<string>? Changed;
@@ -59,6 +60,18 @@ internal sealed class PlaylistTransfers : IDisposable
     }
     public void RetryIncomplete()
     {lock(_gate){foreach(var job in _jobs.Where(j=>!j.Complete))job.RetryAt=DateTimeOffset.MinValue;Save();}}
+    public void Clear()
+    {
+        CancellationTokenSource old;
+        lock(_gate)
+        {
+            var jobs=_jobs.ToArray();_jobs.Clear();
+            try {Save();} catch {_jobs.AddRange(jobs);throw;}
+            old=_importsStop;_importsStop=new();
+        }
+        old.Cancel();old.Dispose();
+        try {Changed?.Invoke("Playlist imports cleared. Downloaded files are kept.");}catch(Exception){}
+    }
     public void UpdateProxy(string setting)
     {
         var replacement=new PlaylistCatalog(PlaylistCatalog.MetadataHandler(setting));
@@ -66,7 +79,7 @@ internal sealed class PlaylistTransfers : IDisposable
     }
     private void Save() {lock(_gate) AtomicJson.Write(_file,_jobs);}
     private void Notice(PlaylistTransfer job,string text)
-    {lock(_gate){job.Status=text;Save();}try { Changed?.Invoke(text); } catch(Exception) {} }
+    {lock(_gate){if(!_jobs.Contains(job))return;job.Status=text;Save();}try { Changed?.Invoke(text); } catch(Exception) {} }
     private async Task Worker()
     {
         while(!_stop.IsCancellationRequested)
@@ -79,6 +92,7 @@ internal sealed class PlaylistTransfers : IDisposable
                 await Task.Delay(TimeSpan.FromSeconds(2),_stop.Token).ConfigureAwait(false);
             }
             catch(OperationCanceledException) when(_stop.IsCancellationRequested) {break;}
+            catch(OperationCanceledException) when(job is not null && !Jobs.Contains(job)) { }
             catch(Exception ex)
             {
                 if(job is not null){job.RetryAt=DateTimeOffset.UtcNow.AddMinutes(10);try{Notice(job,"PLAYLIST_RETRY: "+ex.Message+" Metadata progress saved.");}catch(Exception){}}
@@ -88,13 +102,15 @@ internal sealed class PlaylistTransfers : IDisposable
     }
     internal async Task Step(PlaylistTransfer job,CancellationToken ct)
     {
-        PlaylistCatalog catalog;int networkVersion;lock(_gate){catalog=_catalog;networkVersion=_networkVersion;}
+        PlaylistCatalog catalog;int networkVersion;CancellationTokenSource scope;
+        lock(_gate){if(!_jobs.Contains(job))return;catalog=_catalog;networkVersion=_networkVersion;scope=CancellationTokenSource.CreateLinkedTokenSource(ct,_importsStop.Token);}
+        using var import=scope;ct=import.Token;
         if(!MusicLink.TryParse(job.Url,out var link))throw new InvalidDataException("Invalid saved playlist link.");
         try
         {
             Notice(job,"Reading the complete playlist metadata before requesting audio…");
             var manifest=await catalog.ReadAsync(link!,job.Manifest,
-                m=>{lock(_gate){job.Manifest=m;Save();}},
+                m=>{lock(_gate){if(!_jobs.Contains(job))return;job.Manifest=m;Save();}},
                 text=>Notice(job,text),ct).ConfigureAwait(false);
             if(!manifest.CompleteIds || manifest.Entries.Count!=manifest.Total)throw new InvalidDataException("METADATA_INCOMPLETE: no songs were requested.");
             foreach(var entry in manifest.Entries.OrderBy(e=>e.Position))
@@ -104,9 +120,16 @@ internal sealed class PlaylistTransfers : IDisposable
                 if(entry.Request is not {} request || job.Enqueued.Contains(request.Identity))continue;
                 request=request with {PreferredSource=link!.Kind=="playlist"?"DeezLoad":"Music Hunters"};
                 var track=_sources.Track(request);
-                if(_owned(track) || Downloader.FindExisting(job.Folder,track.FileName) is not null) job.AlreadyOwned++;
-                else _downloads.Start(track,job.Folder);
-                lock(_gate){job.Enqueued.Add(request.Identity);Save();}
+                var owned=_owned(track) || Downloader.FindExisting(job.Folder,track.FileName) is not null;
+                lock(_gate)
+                {
+                    if(!_jobs.Contains(job))return;
+                    if(owned)job.AlreadyOwned++;
+                    else _downloads.Start(track,job.Folder);
+                    // Commit the import's handled identity with the enqueue while holding the
+                    // import gate, so clearing cannot race a later enqueue of a removed song.
+                    job.Enqueued.Add(request.Identity);Save();
+                }
             }
             var unresolved=manifest.Entries.Count(e=>e.Request is null);
             job.Complete=unresolved==0;
@@ -119,8 +142,8 @@ internal sealed class PlaylistTransfers : IDisposable
         {job.RetryAt=DateTimeOffset.UtcNow.AddMinutes(10);Notice(job,"METADATA_RETRY: "+ex.Message+" No incomplete playlist was sent to a bot.");}
         finally
         {
-            lock(_gate){if(networkVersion!=_networkVersion){job.RetryAt=DateTimeOffset.MinValue;Save();}if(!ReferenceEquals(catalog,_catalog)){catalog.Dispose();_retiredCatalogs.Remove(catalog);}}
+            lock(_gate){if(_jobs.Contains(job) && networkVersion!=_networkVersion){job.RetryAt=DateTimeOffset.MinValue;Save();}if(!ReferenceEquals(catalog,_catalog)){catalog.Dispose();_retiredCatalogs.Remove(catalog);}}
         }
     }
-    public void Dispose(){_stop.Cancel();_catalog.Dispose();lock(_gate)foreach(var old in _retiredCatalogs)old.Dispose();}
+    public void Dispose(){_stop.Cancel();_importsStop.Cancel();_catalog.Dispose();lock(_gate)foreach(var old in _retiredCatalogs)old.Dispose();}
 }

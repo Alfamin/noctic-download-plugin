@@ -5,6 +5,7 @@ using Avalonia.Headless;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using FreeMusicFinder;
 using Noctis.Plugins;
 
@@ -48,6 +49,7 @@ internal static class WindowTests
         }
 
         Plugin(music, folder);
+        QueueControls(host, LoggedIn(host), bot);
     }
 
     private static void NotLoggedIn(FakeHost host, Downloads downloads, FakeBot bot)
@@ -109,13 +111,13 @@ internal static class WindowTests
         var rows = Rows(window);
         Check.Equal("3 tracks found, 1 already in your library.", Status(window), "the status counts them");
         Check.Equal("Artist · 3:20 | Artist · 3:20 | Artist · 3:20 · in your library", string.Join(" | ", rows.Select(r => r.Details)), "the one the library has is marked");
-        Check.Equal("Download+ Download+ Download+", Buttons(rows), "all three can be downloaded");
+        Check.Equal("Download now+ Download now+ Download now+", Buttons(rows), "all three can be downloaded");
         Check.True(DownloadAll(window).IsEnabled, "\"Download all\" is on");
 
         Click(rows[0].Button);
-        Check.Until(() => Buttons(rows) == "Starting…- Download+ Download+", "the first one starts");
+        Check.Until(() => Buttons(rows) == "Starting…- Download now+ Download now+", "the first one starts");
         Click(DownloadAll(window));
-        Check.Until(() => Buttons(rows) == "Starting…- Queued- Download+", "\"Download all\" queues the second and leaves out the one in the library");
+        Check.Until(() => downloads.Active.Count==2 && downloads.Active.Any(d=>d.Track.Title=="Second" && !d.Priority), "Queue all adds the second and leaves out the one in the library");
         Check.False(DownloadAll(window).IsEnabled, "\"Download all\" is off: nothing is left for it");
         Picture(window, "1 results, one running, one queued, one in the library");
 
@@ -136,18 +138,19 @@ internal static class WindowTests
 
         var window = new SearchWindow(host, account, downloads, bot.SearchAsync);
         window.Show();
-        Check.Equal("Third: Starting…-", string.Join(",", Rows(window).Select(r => r.Title + ": " + Buttons(new[] { r }))), "the window shows it");
-        Check.Equal("1 download is still going.", Status(window), "and says so");
+        Check.Equal(0, Rows(window).Count, "reopened search does not mix in queued downloads");
+        Check.Equal(1, QueueRows(window).Count, "queue tab shows the running song");
+        Check.Equal("1 pending requests saved in the Queue tab.", Status(window), "status points to saved queue");
 
         window.Search("artist");
-        Check.Until(() => Rows(window).Count == 4, "a search lists its results and keeps the running download in view");
+        Check.Until(() => Rows(window).Count == 3, "search lists only results; running download stays in queue tab");
         var rows = Rows(window);
-        Check.Equal("First,Second,In Library,Third", string.Join(",", rows.Select(r => r.Title)), "results first");
-        Check.Equal("Downloaded- Downloaded- Download+ Starting…-", Buttons(rows), "what is saved already says so");
+        Check.Equal("First,Second,In Library", string.Join(",", rows.Select(r => r.Title)), "search results kept separate");
+        Check.Equal("Downloaded- Downloaded- Download now+", Buttons(rows), "saved search results marked");
         Picture(window, "2 opened again, saved ones marked, a download still running");
 
         gate.SetResult();
-        Check.Until(() => Buttons(rows).EndsWith("Downloaded-"), "the running one finishes in view");
+        Check.Until(() => third.State==DownloadState.Saved && QueueRows(window).Count==0, "completed running request leaves queue tab");
         Check.Until(() => Status(window) == $"Saved \"Third\" to {Path.GetFullPath(folder)}", "the status says what was saved");
         window.Close();
     }
@@ -234,7 +237,7 @@ internal static class WindowTests
         File.SetLastWriteTimeUtc(dead, DateTime.UtcNow.AddHours(-1));
 
         var plugin = new FreeMusicPlugin();
-        Check.Equal("2.5.0", plugin.Info.Version, "the version is the one in plugin.json");
+        Check.Equal("2.5.1", plugin.Info.Version, "the version is the one in plugin.json");
         plugin.Initialize(host);
         Check.Equal("Find more by this artist…", string.Join(",", host.Commands.Select(c => c.Label)), "one track menu entry");
         Check.Until(() => !File.Exists(dead), "what an interrupted download left behind is removed at the start");
@@ -310,6 +313,54 @@ internal static class WindowTests
         Check.Equal(0, host.Logs.Count(l => l.Contains("could not")), "nothing went wrong on the way");
     }
 
+    private static QueueView Queue(SearchWindow window) => (QueueView)typeof(SearchWindow).GetField("_queueView",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(window)!;
+    private static List<Grid> QueueRows(SearchWindow window) => ((StackPanel)((ScrollViewer)Queue(window).Children[2]).Content!).Children.OfType<Grid>().ToList();
+    private static Button QueueButton(SearchWindow window,string label) => Queue(window).GetVisualDescendants().OfType<Button>().First(b=>Equals(b.Content,label));
+    private static void QueueControls(FakeHost host,TelegramAccount account,FakeBot bot)
+    {
+        Check.Section("queue tab: separate search, remove, confirm clear, priority and paging");
+        using var downloads=new Downloads(host.Log);downloads.SetPaused(true);
+        var folder=Check.NewFolder("queue-window");
+        for(int i=0;i<205;i++)downloads.Start(LogicTests.Track("Batch "+i),folder);
+        var window=new SearchWindow(host,account,downloads,bot.SearchAsync);window.Show();
+        Click(((StackPanel)((StackPanel)Root(window).Children[1]).Children[2]).Children.OfType<Button>().Single(b=>Equals(b.Content,"Manage queue")));
+        Check.Equal(100,QueueRows(window).Count,"first 100 requests visible");
+        Click(QueueButton(window,"Next"));
+        Check.Equal("Batch 100",((TextBlock)((StackPanel)QueueRows(window)[0].Children[0]).Children[0]).Text,"paging reaches requests beyond first 100");
+        Click(QueueButton(window,"Next"));Check.Equal(5,QueueRows(window).Count,"final page exposes remaining requests");
+        var remove=((StackPanel)QueueRows(window)[0].Children[1]).Children.OfType<Button>().Single(b=>Equals(b.Content,"Remove"));
+        Click(remove);Check.Equal(204,downloads.Active.Count,"remove deletes only selected song");
+        Check.False(downloads.Active.Any(d=>d.Track.Title=="Batch 200"),"correct selected song removed");
+        ((TextBox)((Grid)Queue(window).Children[0]).Children[0]).Text="Batch 204";
+        Check.Until(()=>QueueRows(window).Count==1,"queue search reaches a song on any page");
+        var promote=((StackPanel)QueueRows(window)[0].Children[1]).Children.OfType<Button>().Single(b=>Equals(b.Content,"Download now"));
+        Click(promote);
+        Check.Until(()=>downloads.History.Any(d=>d.Track.Title=="Batch 204" && d.State==DownloadState.Saved),"download now promotes existing song despite paused batch");
+        Check.True(downloads.Paused && downloads.Active.Count==203,"remaining batch stays paused");
+        Click(QueueButton(window,"Clear queue…"));
+        Check.Equal(203,downloads.Active.Count,"opening clear confirmation changes nothing");
+        Click(QueueButton(window,"Keep queue"));Check.Equal(203,downloads.Active.Count,"cancel clear preserves queue");
+        Click(QueueButton(window,"Clear queue…"));Click(QueueButton(window,"Yes, clear queue"));
+        Check.Equal(0,downloads.History.Count,"confirmed clear erases backlog and request history");
+        Check.True(File.Exists(Path.Combine(folder,"Artist - Batch 204.mp3")),"clear keeps downloaded audio");
+        bot.Answers["queue demo"]=()=>new[]{LogicTests.Track("New queue demo")};
+        window.Search("queue demo");Check.Until(()=>Rows(window).Count==1,"search usable after clearing");
+        var result=((StackPanel)typeof(SearchWindow).GetField("_results",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(window)!).Children.OfType<Grid>().First();
+        var add=result.Children.OfType<Button>().Single(b=>Equals(b.Content,"Add to queue"));
+        Picture(window,"8 search and queue actions");Click(add);
+        Check.Equal(1,downloads.Active.Count,"add to queue uses background lane");
+        Check.False(downloads.Active.Single().Priority,"add to queue respects paused batch");
+        Click(Rows(window)[0].Button);
+        Check.Until(()=>downloads.Active.Count==0 && downloads.History.Last().State==DownloadState.Saved,"search Download now promotes a song already added to queue");
+        Check.True(downloads.Paused,"manual search download leaves batch pause intact");
+        downloads.Start(LogicTests.Track("Visible pending example"),folder);
+        ((TabControl)Root(window).Children[2]).SelectedIndex=1;
+        ((TextBox)((Grid)Queue(window).Children[0]).Children[0]).Text="";Dispatcher.UIThread.RunJobs();
+        Queue(window).Refresh();Picture(window,"9 separate queue management");
+        window.Width=480;Picture(window,"10 narrow queue management");
+        window.Close();
+    }
+
     // ── looking at the window ──
 
     private sealed record RowView(string Title, string Details, Button Button);
@@ -318,7 +369,7 @@ internal static class WindowTests
 
     private static List<RowView> Rows(SearchWindow window)
     {
-        var panel = (StackPanel)((ScrollViewer)Root(window).Children[2]).Content!;
+        var panel = (StackPanel)typeof(SearchWindow).GetField("_results",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(window)!;
         return panel.Children.Cast<Grid>().Select(row =>
         {
             var text = (StackPanel)row.Children[0];
@@ -331,7 +382,7 @@ internal static class WindowTests
 
     private static string Status(SearchWindow window) => ((Grid)Root(window).Children[3]).Children.OfType<TextBlock>().First().Text ?? "";
 
-    private static Button DownloadAll(SearchWindow window) => ((Grid)Root(window).Children[3]).Children.OfType<Button>().First(b => "Download all".Equals(b.Content));
+    private static Button DownloadAll(SearchWindow window) => ((Grid)Root(window).Children[3]).Children.OfType<Button>().First(b => "Queue all".Equals(b.Content));
 
     private static Button TelegramButton(SearchWindow window) => ((Grid)Root(window).Children[3]).Children.OfType<Button>().First();
 
@@ -345,7 +396,7 @@ internal static class WindowTests
         Dispatcher.UIThread.RunJobs();
         AvaloniaHeadlessPlatform.ForceRenderTimerTick();
         using var file = File.Create(Path.Combine(_pictures, name + ".png"));
-        window.CaptureRenderedFrame()?.Save(file);
+        window.CaptureRenderedFrame()?.Save(file,Avalonia.Media.Imaging.PngBitmapEncoderOptions.Default);
     }
 
     /// <summary>A key press in a window; returns whether someone took it.</summary>

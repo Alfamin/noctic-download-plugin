@@ -3,7 +3,7 @@
 Finds songs and imports Spotify/Deezer playlists through Music Hunters and DeezLoad using
 your own Telegram account, from inside [Noctis](https://github.com/heartached/Noctis).
 
-Version 2.5 adds full metadata manifests, individual source fallback, durable queues across
+Version 2.5.1 adds editable queues and priority downloads. Version 2.5 added full metadata manifests, individual source fallback, durable queues across
 restarts, independent bot cooldowns and a visible progress/pause panel. Music Hunters handles
 quick searches first; playlist requests prefer DeezLoad when available. See
 [user instructions](README-USERS.md#good-to-know).
@@ -38,16 +38,21 @@ The shortcut is not a plugin API feature: the plugin listens to key presses in N
 and takes only ones Noctis has not handled, so if Noctis itself uses the same keys, Noctis wins.
 
 The first time, press **Log in to Telegram…** (see below). Then type an artist and title, press
-Enter, and press **Download** on a row or **Download all**. A search sends `/search <your text>`
+Enter, and press **Download now** for priority, **Add to queue** for batch work, or **Queue all**. A search sends `/search <your text>`
 to the bot from your account and lists its first page of results; a download makes the bot send
 the file.
 
 - Results your Noctis library already has (in any of its folders) are marked "in your library".
-  They can still be downloaded one by one; **Download all** leaves them out.
-- Downloads run one at a time, in the order you asked for them: the bot sends one file at a
+  They can still be downloaded one by one; **Queue all** leaves them out.
+- Downloads run one at a time, with manual priority requests before batch work: the bot sends one file at a
   time. They belong to the plugin, not to the window: closing the window does not stop them, and
-  opening it again shows the ones still going. Unfinished work is saved when the plugin or
+  opening the **Queue** tab shows the ones still going. Unfinished work is saved when the plugin or
   Noctis closes, and resumes when it is running again.
+- The **Queue** tab supports artist/title filtering, pages, **Remove**, and **Download now**.
+  **Clear queue…** requires confirmation, cancels local work and metadata imports, and erases
+  requests/history without deleting downloaded audio. Removed requests never resume on restart.
+  Priority works while batch work is paused, respects provider cooldowns, and does not interrupt
+  the current transfer. Clearing/removing locally does not retract a message already sent to a bot.
 - Only the file that was asked for is saved. The bot answers everything in one chat, so a file
   can arrive that belongs to an earlier request or is something else altogether; it is told
   apart by its name and length and left alone. Files that are not songs are never saved.
@@ -160,6 +165,7 @@ Not covered by them: everything that needs the real bot and a real Telegram logi
 - `FreeMusicFinder/Shortcut.cs` — reads the shortcut setting
 - `FreeMusicFinder/SearchWindow.cs` — the search window (Avalonia, built in code)
 - `FreeMusicFinder/Downloads.cs` — the download queue: one at a time, independent of the window
+- `FreeMusicFinder/QueueView.cs` — queue filtering, pages, individual actions and confirmed clearing
 - `FreeMusicFinder/Downloader.cs` — file names, the download folder, saving a file, tidying up
 - `FreeMusicFinder/BotText.cs` — reads the bot's result list; tells whether two descriptions mean the same song
 - `FreeMusicFinder/Telegram.cs` — the Telegram account (login steps, connection) and the bot: search and file download
