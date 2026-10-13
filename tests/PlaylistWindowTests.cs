@@ -1,0 +1,60 @@
+using System.Reflection;
+using Avalonia.Controls;
+using Avalonia.Headless;
+using Avalonia.Interactivity;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
+using FreeMusicFinder;
+
+namespace FreeMusicFinder.Tests;
+
+internal static class PlaylistWindowTests
+{
+    public static void Run(string? pictures)
+    {
+        Check.Section("playlist screen: batch paste, missing queue, no-login handling and narrow layout");
+        var folder = Check.NewFolder("playlist-screen"); var library = new SpotifyPlaylistTests.Library();
+        library.Add(folder, "Song 0"); library.Add(Path.Combine(folder, "second/sub"), "Song 2");
+        var sources = new MusicSources(new TransferTests.Source("DeezLoad"), new TransferTests.Source("Music Hunters"), _ => { });
+        using var downloads = new Downloads(_ => { });
+        using var imports = new SpotifyPlaylists(Path.Combine(folder, "imports.json"), library, downloads, sources.Track, new PlaylistCatalog(new SpotifyPlaylistTests.Http()));
+        var view = new PlaylistView(imports, downloads, () => folder, () => false);
+        var window = new Window { Title = "Free Music Finder · Playlists", Content = view, Width = 760, Height = 680, MinWidth = 480 };
+        FinderTheme.Apply(window);
+        window.Show();
+        Field<TextBox>(view, "_links").Text = SpotifyPlaylistTests.Url(1) + "\n\n" + SpotifyPlaylistTests.Url(2);
+        Click(Field<Button>(view, "_create"));
+        Check.Until(() => imports.Jobs.Count == 2 && imports.Jobs.All(j => j.Created) && !imports.Busy, "multi-playlist paste creates both playlists from screen");
+        Check.Until(() => Field<Button>(view, "_queue").IsEnabled, "queue button appears after matching");
+        Check.True(Field<TextBlock>(view, "_details").Text!.Contains("2/4"), "exact found/total summary visible");
+        Click(Field<Button>(view, "_queue"));
+        Check.Until(() => downloads.Active.Count == 2, "screen queues only unique missing songs");
+        Check.Until(() => Field<Button>(view, "_start").IsEnabled, "Start queued downloads is visible and enabled");
+        Check.True(downloads.Active.All(d => d.Held), "screen does not start staged downloads automatically");
+        Click(Field<Button>(view, "_start"));
+        Check.True(Field<TextBlock>(view, "_status").Text!.Contains("Log in to Telegram"), "start explains login requirement without disturbing import");
+        Check.True(downloads.Active.All(d => d.Held), "logged-out start keeps staging hold");
+        if (!string.IsNullOrWhiteSpace(pictures))
+        {
+            Save(window, pictures, "11 Spotify playlists"); window.Width = 480; Save(window, pictures, "12 narrow Spotify playlists");
+            Check.True(Field<Button>(view, "_start").Bounds.Right <= view.Bounds.Width, "start button fits minimum width");
+            window.RequestedThemeVariant = Avalonia.Styling.ThemeVariant.Light;
+            Save(window, pictures, "13 light Spotify playlists");
+        }
+        var before = downloads.Active.Count;
+        var remove = view.GetVisualDescendants().OfType<Button>().First(b => Equals(b.Content, "Remove import"));
+        Click(remove);
+        Check.Until(() => imports.Jobs.Count == 1, "remove import is available from screen");
+        Check.Equal(2, library.Lists.Count, "removing an import keeps native playlists");
+        Check.Equal(before, downloads.Active.Count, "removing an import keeps explicit queued requests");
+        window.Close(); view.Dispose();
+    }
+    private static void Save(Window window, string folder, string name)
+    {
+        Directory.CreateDirectory(folder); Dispatcher.UIThread.RunJobs(); AvaloniaHeadlessPlatform.ForceRenderTimerTick();
+        using var file = File.Create(Path.Combine(folder, name + ".png"));
+        window.CaptureRenderedFrame()?.Save(file, Avalonia.Media.Imaging.PngBitmapEncoderOptions.Default);
+    }
+    private static T Field<T>(object value, string name) => (T)value.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(value)!;
+    private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+}

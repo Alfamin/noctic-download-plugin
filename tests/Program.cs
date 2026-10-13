@@ -11,6 +11,8 @@ try
     await TransferTests.RunAsync();
     await QueueManagementTests.RunAsync();
     await BotSelectionTests.RunAsync();
+    await SpotifyPlaylistTests.RunAsync();
+    await LivePlaylistTest.RunAsync(Environment.GetEnvironmentVariable("FMF_SPOTIFY_PLAYLIST"), Environment.GetEnvironmentVariable("FMF_LIBRARY_SNAPSHOT"), Environment.GetEnvironmentVariable("FMF_LIVE_REPORT"));
 
     var pictures = Environment.GetEnvironmentVariable("FMF_PICTURES");
     var app = AppBuilder.Configure<TestApp>();
@@ -18,6 +20,8 @@ try
     else app.UseSkia().UseHarfBuzz().UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = false });
     app.SetupWithoutStarting();
     WindowTests.Run(string.IsNullOrEmpty(pictures) ? null : pictures);
+    PlaylistWindowTests.Run(pictures);
+    NativePlaylistTests.Run(Environment.GetEnvironmentVariable("FMF_NOCTIS_APP"));
 }
 catch (Exception ex)
 {

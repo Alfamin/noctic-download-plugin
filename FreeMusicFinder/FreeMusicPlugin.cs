@@ -27,6 +27,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     private TelegramAccount? _telegram;
     private MusicSources? _bot;
     private PlaylistTransfers? _transfers;
+    private SpotifyPlaylists? _playlists;
     private Downloads? _downloads;
     private SearchWindow? _window;
     private KeyGesture? _shortcut;
@@ -50,6 +51,8 @@ public sealed class FreeMusicPlugin : INoctisPlugin
             Path.Combine(host.DataDirectory,"source-limits.json"));
         _downloads = new Downloads(Log,Path.Combine(host.DataDirectory,"download-queue.json"),_bot.Track);
         _transfers = new PlaylistTransfers(_telegram,_bot,_downloads,Path.Combine(host.DataDirectory,"playlist-queue.json"),Owns,
+            new PlaylistCatalog(PlaylistCatalog.MetadataHandler(_proxy)));
+        _playlists = new SpotifyPlaylists(Path.Combine(host.DataDirectory, "spotify-playlists.json"), new PlaylistLibrary(), _downloads, _bot.Track,
             new PlaylistCatalog(PlaylistCatalog.MetadataHandler(_proxy)));
         _transfers.Changed += Announce;
         _downloads.Finished += Announce;
@@ -87,6 +90,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
 
         _window?.Close();
         _window = null;
+        _playlists?.Dispose(); _playlists = null;
         if (_downloads is not null) _downloads.Finished -= Announce;
         _downloads?.Dispose();
         _downloads = null;
@@ -105,6 +109,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
         {
             _proxy = _host?.Settings.GetString(ProxyKey) ?? "";
             try{_transfers?.UpdateProxy(_proxy);}catch(Exception ex){Announce("Metadata proxy: "+ex.Message);}
+            UpdatePlaylistProxy();
         }
         else if (key == ShortcutKey) ApplyShortcut();
     }
@@ -138,7 +143,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
         {
             if (_window is null)
             {
-                _window = new SearchWindow(_host, _telegram, _downloads, _bot.SearchAsync,_transfers);
+                _window = new SearchWindow(_host, _telegram, _downloads, _bot.SearchAsync,_transfers,_playlists);
                 _window.Closed += (_, _) => _window = null;
 
                 var owner = (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.MainWindow;
@@ -169,6 +174,12 @@ public sealed class FreeMusicPlugin : INoctisPlugin
                 .Any(t=>File.Exists(t.FilePath) && RecordingMatch.Fits(new MusicRequest(track.Title,track.Artist,track.Duration?.TotalSeconds),t.Artist,t.Title,t.Duration))??false).GetAwaiter().GetResult();
         }
         catch(Exception ex) {Log("Could not check existing library: "+ex.Message);return false;}
+    }
+    private async void UpdatePlaylistProxy()
+    {
+        try { if (_playlists is {} playlists) await playlists.UpdateProxyAsync(_proxy); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Announce("Playlist metadata proxy: " + ex.Message); }
     }
 
     /// <summary>Tells the user what was saved. Called from the download thread.</summary>

@@ -43,10 +43,12 @@ internal sealed class SearchWindow : Window
     private readonly TabControl _tabs;
     private readonly TabItem _queueTab;
     private readonly QueueView _queueView;
+    private readonly PlaylistView? _playlistView;
+    private readonly Border _queueCard;
 
     /// <param name="searchBot">Asks the bot for the tracks that match a text.</param>
     public SearchWindow(IPluginHost host, TelegramAccount telegram, Downloads downloads,
-        Func<string, CancellationToken, Task<IReadOnlyList<BotTrack>>> searchBot,PlaylistTransfers? transfers=null)
+        Func<string, CancellationToken, Task<IReadOnlyList<BotTrack>>> searchBot,PlaylistTransfers? transfers=null,SpotifyPlaylists? playlists=null)
     {
         _host = host;
         _telegram = telegram;
@@ -55,10 +57,11 @@ internal sealed class SearchWindow : Window
         _transfers=transfers;
 
         Title = "Free Music Finder";
-        Width = 760;
-        Height = 560;
+        FinderTheme.Apply(this);
+        Width = 840;
+        Height = 740;
         MinWidth = 480;
-        MinHeight = 320;
+        MinHeight = 520;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
         _query = new TextBox { PlaceholderText = "Search artist/title, or paste a Spotify or Deezer link" };
@@ -71,13 +74,14 @@ internal sealed class SearchWindow : Window
 
         _searchButton = new Button { Content = "Search", Margin = new Thickness(8, 0, 0, 0), MinWidth = 80, HorizontalContentAlignment = HorizontalAlignment.Center };
         _searchButton.Click += (_, _) => StartSearch();
+        FinderTheme.Primary(_searchButton);
 
         var top = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
         top.Children.Add(_query);
         Grid.SetColumn(_searchButton, 1);
         top.Children.Add(_searchButton);
 
-        _results = new StackPanel { Spacing = 2 };
+        _results = new StackPanel { Spacing = 8 };
         var scroller = new ScrollViewer { Content = _results, Margin = new Thickness(0, 12, 0, 12) };
 
         _status = new TextBlock
@@ -98,15 +102,12 @@ internal sealed class SearchWindow : Window
         var openFolder = new Button { Content = "Open folder", Margin = new Thickness(8, 0, 0, 0) };
         openFolder.Click += (_, _) => OpenFolder();
 
-        var bottom = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"),RowDefinitions=new RowDefinitions("Auto,Auto") };
-        Grid.SetColumnSpan(_status,3);
+        var bottom = new StackPanel { Spacing = 8 };
         bottom.Children.Add(_status);
-        Grid.SetRow(_telegramButton,1);
-        bottom.Children.Add(_telegramButton);
-        Grid.SetRow(_downloadAllButton,1);Grid.SetColumn(_downloadAllButton, 1);
-        bottom.Children.Add(_downloadAllButton);
-        Grid.SetRow(openFolder,1);Grid.SetColumn(openFolder, 2);
-        bottom.Children.Add(openFolder);
+        var footerButtons = new WrapPanel();
+        _telegramButton.Margin = _downloadAllButton.Margin = openFolder.Margin = new Thickness(0, 0, 8, 4);
+        footerButtons.Children.Add(_telegramButton); footerButtons.Children.Add(_downloadAllButton); footerButtons.Children.Add(openFolder);
+        bottom.Children.Add(footerButtons);
 
         _queueStatus=new TextBlock {TextWrapping=TextWrapping.Wrap,Opacity=0.8,Margin=new Thickness(0,8,0,4)};
         _queueProgress=new ProgressBar {Minimum=0,Maximum=100,Height=5,Margin=new Thickness(0,0,0,8)};
@@ -117,7 +118,7 @@ internal sealed class SearchWindow : Window
         var manage=new Button {Content="Manage queue",Margin=new Thickness(8,0,0,0)};
         manage.Click+=(_,_)=>_tabs!.SelectedIndex=1;
         var queueButtons=new StackPanel {Orientation=Orientation.Horizontal};queueButtons.Children.Add(_pauseButton);queueButtons.Children.Add(retry);queueButtons.Children.Add(manage);
-        var queuePanel=new StackPanel();queuePanel.Children.Add(_queueStatus);queuePanel.Children.Add(_queueProgress);queuePanel.Children.Add(queueButtons);
+        var queuePanel=new StackPanel { Spacing = 4 };queuePanel.Children.Add(_queueStatus);queuePanel.Children.Add(_queueProgress);queuePanel.Children.Add(queueButtons);
         _queueView=new QueueView(_downloads,()=>
         {
             // Stop the producer first, including any metadata request already in flight.
@@ -125,15 +126,38 @@ internal sealed class SearchWindow : Window
             _status.Text="Queue cleared. Downloaded files were kept.";ShowQueue();
         },text=>_status.Text=text);
         _queueTab=new TabItem {Header="Queue",Content=_queueView};
-        _tabs=new TabControl {ItemsSource=new[] {new TabItem {Header="Search",Content=scroller},_queueTab}};
-        var root = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto"), Margin = new Thickness(16) };
-        root.Children.Add(top);
-        Grid.SetRow(queuePanel,1);root.Children.Add(queuePanel);
+        var tabs = new List<TabItem> { new() { Header = "Search", Content = scroller }, _queueTab };
+        if (playlists is not null)
+        {
+            _playlistView = new PlaylistView(playlists, downloads, () => DownloadFolder, () => _telegram.IsLoggedIn);
+            tabs.Add(new TabItem { Header = "Playlists", Content = _playlistView });
+        }
+        _tabs=new TabControl {ItemsSource=tabs};
+        top.Margin = new Thickness(0, 0, 0, 12);
+        var header = new StackPanel { Spacing = 6 };
+        header.Children.Add(new TextBlock { Text = "Free Music Finder", FontSize = 25, FontWeight = FontWeight.SemiBold });
+        header.Children.Add(FinderTheme.Caption("Find a song, manage downloads, or bring your Spotify playlists into Noctis."));
+        header.Children.Add(top); top.Margin = new Thickness(0, 8, 0, 0);
+        var root = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto"), Margin = new Thickness(20), RowSpacing = 12 };
+        root.Children.Add(header);
+        _queueCard = FinderTheme.Card(queuePanel, 12);
+        Grid.SetRow(_queueCard,1);root.Children.Add(_queueCard);
+        _tabs.SelectionChanged += (_, _) =>
+        {
+            top.IsVisible = _tabs.SelectedIndex == 0;
+            _downloadAllButton.IsVisible = _tabs.SelectedIndex == 0;
+            _status.IsVisible = _tabs.SelectedIndex != 2;
+            ShowQueue();
+        };
         Grid.SetRow(_tabs, 2);
         root.Children.Add(_tabs);
         Grid.SetRow(bottom, 3);
         root.Children.Add(bottom);
         Content = root;
+        var welcome = new StackPanel { Spacing = 8, Margin = new Thickness(6, 12) };
+        welcome.Children.Add(new TextBlock { Text = "What do you want to listen to?", FontSize = 18, FontWeight = FontWeight.SemiBold });
+        welcome.Children.Add(FinderTheme.Caption("Search an artist or song above. Choose Download now for one song, or build a batch with Add to queue."));
+        _results.Children.Add(FinderTheme.Card(welcome));
 
         ShowTelegramState();
         _status.Text = _telegram.IsLoggedIn
@@ -154,6 +178,7 @@ internal sealed class SearchWindow : Window
             _downloads.Finished -= OnDownloadsFinished;
             if(_transfers is not null) _transfers.Changed-=OnTransferChanged;
             _queueTimer.Stop();
+            _playlistView?.Dispose();
             _closed.Cancel();
             _search?.Cancel();
         };
@@ -293,14 +318,14 @@ internal sealed class SearchWindow : Window
         text.Children.Add(title);
         text.Children.Add(subtitle);
 
-        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), Margin = new Thickness(4, 6) };
+        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), Margin = new Thickness(0, 2) };
         grid.Children.Add(text);
         Grid.SetColumn(button, 1);
         grid.Children.Add(button);
         Grid.SetColumn(queueButton,2);grid.Children.Add(queueButton);
 
         _rows.Add(row);
-        _results.Children.Add(grid);
+        _results.Children.Add(FinderTheme.Card(grid, 12));
     }
 
     /// <summary>
@@ -393,11 +418,13 @@ internal sealed class SearchWindow : Window
         _queueStatus.Text=all.Count==0?"Paste a playlist link to start a saved import.":$"{done} saved / {all.Count} queued · {pending} pending · {failed} need retry";
         if(waiting.Length>0 && waiting.Min(d=>d.RetryAt) is {} retry) _queueStatus.Text+=$" · next check {retry.ToLocalTime():ddd HH:mm}";
         if(_downloads.Paused) _queueStatus.Text+=" · paused after the current request";
+        if (_downloads.Active.Count(d => d.Held) is > 0 and var held) _queueStatus.Text += $" · {held} ready to start in Playlists";
         if(_transfers?.Jobs.Count(j=>!j.Complete)>0) _queueStatus.Text+=" · playlist collection continues";
         _queueProgress.Value=all.Count>0?100.0*done/all.Count:0;
         _pauseButton.Content=_downloads.Paused?"Resume queue":"Pause queue";
         _queueTab.Header=$"Queue ({pending+failed})";
         _queueView.Refresh();
+        _queueCard.IsVisible = _tabs.SelectedIndex != 2 && (all.Count > 0 || _transfers?.Jobs.Any(j => !j.Complete) == true);
     }
 
     private void OpenFolder()

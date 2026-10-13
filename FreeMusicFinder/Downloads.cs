@@ -12,6 +12,7 @@ internal sealed class Download(BotTrack track, string folder)
     public string Error { get; internal set; } = "";
     public DateTimeOffset? RetryAt { get; internal set; }
     public bool Priority { get; internal set; }
+    public bool Held { get; internal set; }
     public bool IsActive => State is DownloadState.Queued or DownloadState.Running or DownloadState.Waiting;
 }
 
@@ -57,7 +58,7 @@ internal sealed class Downloads : IDisposable
                     throw new InvalidDataException("QUEUE_UNREADABLE: invalid track or folder.");
                 if (item.State == DownloadState.Removed) continue;
                 var download = new Download(restore(item.Request), item.Folder)
-                    { State = item.State, Error = item.Error, RetryAt = item.RetryAt, Priority = item.Priority };
+                    { State = item.State, Error = item.Error, RetryAt = item.RetryAt, Priority = item.Priority, Held = item.Held };
                 _known.Add(download);
                 if (item.State is DownloadState.Saved or DownloadState.AlreadyThere or DownloadState.Failed) continue;
                 download.State = item.RetryAt > DateTimeOffset.UtcNow ? DownloadState.Waiting : DownloadState.Queued;
@@ -69,14 +70,14 @@ internal sealed class Downloads : IDisposable
         _ = Task.Run(RunAsync);
     }
 
-    private sealed record QueueItem(MusicRequest Request, string Folder, DownloadState State, string Error, DateTimeOffset? RetryAt, bool Priority = false);
+    private sealed record QueueItem(MusicRequest Request, string Folder, DownloadState State, string Error, DateTimeOffset? RetryAt, bool Priority = false, bool Held = false);
     private sealed record QueueFile(int Version, bool Paused, QueueItem[] Items);
     private void Save()
     {
         var active = _active.ToHashSet();
         if (_store is not null) AtomicJson.Write(_store, new QueueFile(1, _paused,
             _active.Concat(_known.Where(d => !active.Contains(d))).Where(d => d.Track.Request is not null)
-                .Select(d => new QueueItem(d.Track.Request!, d.Folder, d.State, d.Error, d.RetryAt, d.Priority)).ToArray()));
+                .Select(d => new QueueItem(d.Track.Request!, d.Folder, d.State, d.Error, d.RetryAt, d.Priority, d.Held)).ToArray()));
     }
     private void Wake() { try { _wake.Release(); } catch (SemaphoreFullException) { } }
     public void SetPaused(bool paused)
@@ -98,7 +99,7 @@ internal sealed class Downloads : IDisposable
     public Download? Find(string fileName, string folder)
     { folder = Path.GetFullPath(folder); lock (_gate) return _active.FirstOrDefault(d => Same(d, fileName, folder)); }
 
-    public Download Start(BotTrack track, string folder, bool priority = false)
+    public Download Start(BotTrack track, string folder, bool priority = false, bool held = false)
     {
         folder = Path.GetFullPath(folder);
         Download download;
@@ -111,7 +112,7 @@ internal sealed class Downloads : IDisposable
             }
             else
             {
-                download = new Download(track, folder) { Priority = priority };
+                download = new Download(track, folder) { Priority = priority, Held = held && !priority };
                 if (_stop.IsCancellationRequested) { download.State = DownloadState.Cancelled; return download; }
                 if (_known.Count >= 10000) throw new InvalidOperationException("QUEUE_FULL: clear finished history or remove requests before adding more than 10,000 tracks.");
                 _known.Add(download); Insert(download);
@@ -127,9 +128,20 @@ internal sealed class Downloads : IDisposable
     }
     private void PromoteLocked(Download item)
     {
-        int index = _active.IndexOf(item); item.Priority = true;
+        int index = _active.IndexOf(item); var held = item.Held; item.Priority = true; item.Held = false;
         _active.Remove(item); Insert(item);
-        try { Save(); } catch { item.Priority = false; _active.Remove(item); _active.Insert(index, item); throw; }
+        try { Save(); } catch { item.Priority = false; item.Held = held; _active.Remove(item); _active.Insert(index, item); throw; }
+    }
+    public int ReleaseHeld()
+    {
+        Download[] held;
+        lock (_gate)
+        {
+            held = _active.Where(d => d.Held).ToArray();
+            foreach (var item in held) item.Held = false;
+            try { Save(); } catch { foreach (var item in held) item.Held = true; throw; }
+        }
+        Wake(); foreach (var item in held) Raise(item); return held.Length;
     }
     public void DownloadNext(Download item)
     {
@@ -186,7 +198,7 @@ internal sealed class Downloads : IDisposable
                 TimeSpan delay = TimeSpan.FromMinutes(1);
                 lock (_gate)
                 {
-                    var eligible = _active.Where(d => d != _current && (!_paused || d.Priority)).ToArray();
+                    var eligible = _active.Where(d => d != _current && !d.Held && (!_paused || d.Priority)).ToArray();
                     download = eligible.FirstOrDefault(d => d.RetryAt is null || d.RetryAt <= DateTimeOffset.UtcNow);
                     if (download is not null)
                     {

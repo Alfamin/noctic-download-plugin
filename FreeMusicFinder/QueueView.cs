@@ -27,7 +27,7 @@ internal sealed class QueueView : Grid
         _downloads = downloads; _clear = clear; _status = status;
         RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto");
         var clearButton = new Button { Content = "Clear queue…", HorizontalAlignment = HorizontalAlignment.Right };
-        clearButton.Click += (_, _) => { _confirmText.Text = "Clear all queued requests, failed requests and playlist imports? The current transfer will stop. Downloaded files stay on disk."; _confirmation!.IsVisible = true; };
+        clearButton.Click += (_, _) => { _confirmText.Text = "Clear all queued requests, failed requests and pending download imports? The current transfer will stop. Created Noctis playlists and downloaded files stay."; _confirmation!.IsVisible = true; };
         var top = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(0, 8) };
         top.Children.Add(_filter); Grid.SetColumn(clearButton, 1); top.Children.Add(clearButton); Children.Add(top);
         _filter.TextChanged += (_, _) => { _index = 0; Refresh(); };
@@ -64,7 +64,7 @@ internal sealed class QueueView : Grid
             foreach (var item in visible)
             {
                 var row = new QueueRow(item, () => Act(() => _downloads.DownloadNext(item)), () => Act(() => _downloads.Remove(item)));
-                _rows.Add(item, row); _list.Children.Add(row);
+                _rows.Add(item, row); _list.Children.Add(FinderTheme.Card(row, 12));
             }
             _visible = visible;
         }
@@ -98,7 +98,7 @@ internal sealed class QueueView : Grid
                 DownloadState.Running => _item.Progress > 0 ? $"Downloading {_item.Progress:P0}" : "Requesting file…",
                 DownloadState.Waiting => $"Waiting · {_item.RetryAt?.ToLocalTime():ddd HH:mm}",
                 DownloadState.Failed => "Failed · " + _item.Error,
-                _ => _item.Priority ? "Next to download" : "Queued",
+                _ => _item.Held ? "Ready · start playlist downloads to continue" : _item.Priority ? "Next to download" : "Queued",
             });
             ToolTip.SetTip(_state, string.IsNullOrEmpty(_item.Error) ? null : _item.Error);
             _next.IsEnabled = _item.State==DownloadState.Failed || (_item.IsActive && _item.State != DownloadState.Running && !_item.Priority);

@@ -3,6 +3,10 @@
 Finds songs and imports Spotify/Deezer playlists through Music Hunters and DeezLoad using
 your own Telegram account, from inside [Noctis](https://github.com/heartached/Noctis).
 
+Version 2.6 adds a **Playlists** tab: paste several Spotify playlists, match songs across
+all local library folders, and create ordered Noctis playlists. Unique missing recordings wait
+in the shared queue until you start them; new downloads fill their original positions.
+Search, Queue and Playlists now share a refined layout for narrow windows and light/dark themes.
 Version 2.5.2 preserves exact Music Hunters search buttons across downloads and queue restarts,
 binds each result to the bot that returned it, and checks DeezLoad inline artist/title links.
 Version 2.5.1 added editable queues and priority downloads. Version 2.5 added full metadata manifests, individual source fallback, durable queues across
@@ -75,6 +79,36 @@ While a file is being downloaded it is called `<name>.fmf.part`, so that neither
 anything else that watches the folder (the [WordLyrics](https://github.com/Alfamin/WordLyrics)
 plugin, for one) takes a half-written file for a song. What a download left behind when Noctis
 was closed in the middle of it is removed at the next start.
+
+## Bring Spotify playlists into Noctis
+
+1. Open **Playlists**, paste full Spotify playlist links (one per line), and choose **Create playlists**.
+2. Review the matched/total counts and **Missing songs**. Matching reads your scanned local
+   library across subfolders and multiple roots; no Telegram login is needed.
+3. Choose **Queue missing songs**, then **Start queued downloads**. Log in to Telegram if needed.
+
+These are normal Noctis playlists named after Spotify, using shared file references. Audio is
+not copied or moved. Original order and duplicate entries are retained. Different playlists
+with the same name remain separate; re-pasting a link resumes its saved import. Recording
+checks use artist, title, version and duration. Known clean versions are not substituted for
+explicit songs; metadata alone cannot prove an untagged recording is explicit.
+
+Unidentified local Spotify files, podcasts, blocked metadata, unavailable recordings and bot
+limits stay listed while other tracks continue. Shared missing recordings are queued once.
+New requests wait for Start; existing download work is unaffected. Remove/retry/clear requests
+in Queue. Clearing it keeps Noctis playlists and does not automatically refill downloads.
+Hidden Noctis folders are reported; their files are not downloaded twice.
+
+Noctis must scan completed downloads. If folder watching is off or the destination is outside
+your library, add the folder/rescan, then **Check library again**. Saved manifests fill gaps
+across restarts. This checks local files; automatic Spotify refetch/synchronization is deferred.
+Private playlists must be accessible to the public metadata reader; there is no Spotify login.
+
+Manual song/order edits and deleted playlists stop automatic filling, preserving your edits.
+**Remove import** stops tracking but keeps the native playlist, audio and existing requests.
+The desktop adapter validates Noctis's contract and uses its native save/refresh methods.
+An unsupported future version shows an error before changes. Saved source records are in
+the plugin data folder as `spotify-playlists.json`, without Spotify access tokens.
 
 ## Where Telegram is blocked
 

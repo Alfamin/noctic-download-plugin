@@ -50,6 +50,7 @@ internal static class WindowTests
 
         Plugin(music, folder);
         QueueControls(host, LoggedIn(host), bot);
+        PlaylistTab(host, LoggedIn(host), bot);
     }
 
     private static void NotLoggedIn(FakeHost host, Downloads downloads, FakeBot bot)
@@ -237,7 +238,7 @@ internal static class WindowTests
         File.SetLastWriteTimeUtc(dead, DateTime.UtcNow.AddHours(-1));
 
         var plugin = new FreeMusicPlugin();
-        Check.Equal("2.5.2", plugin.Info.Version, "the version is the one in plugin.json");
+        Check.Equal("2.6.0", plugin.Info.Version, "the version is the one in plugin.json");
         plugin.Initialize(host);
         Check.Equal("Find more by this artist…", string.Join(",", host.Commands.Select(c => c.Label)), "one track menu entry");
         Check.Until(() => !File.Exists(dead), "what an interrupted download left behind is removed at the start");
@@ -314,7 +315,7 @@ internal static class WindowTests
     }
 
     private static QueueView Queue(SearchWindow window) => (QueueView)typeof(SearchWindow).GetField("_queueView",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(window)!;
-    private static List<Grid> QueueRows(SearchWindow window) => ((StackPanel)((ScrollViewer)Queue(window).Children[2]).Content!).Children.OfType<Grid>().ToList();
+    private static List<Grid> QueueRows(SearchWindow window) => ((StackPanel)((ScrollViewer)Queue(window).Children[2]).Content!).Children.OfType<Border>().Select(b => b.Child).OfType<Grid>().ToList();
     private static Button QueueButton(SearchWindow window,string label) => Queue(window).GetVisualDescendants().OfType<Button>().First(b=>Equals(b.Content,label));
     private static void QueueControls(FakeHost host,TelegramAccount account,FakeBot bot)
     {
@@ -323,7 +324,7 @@ internal static class WindowTests
         var folder=Check.NewFolder("queue-window");
         for(int i=0;i<205;i++)downloads.Start(LogicTests.Track("Batch "+i),folder);
         var window=new SearchWindow(host,account,downloads,bot.SearchAsync);window.Show();
-        Click(((StackPanel)((StackPanel)Root(window).Children[1]).Children[2]).Children.OfType<Button>().Single(b=>Equals(b.Content,"Manage queue")));
+        Click(window.GetVisualDescendants().OfType<Button>().Single(b=>Equals(b.Content,"Manage queue")));
         Check.Equal(100,QueueRows(window).Count,"first 100 requests visible");
         Click(QueueButton(window,"Next"));
         Check.Equal("Batch 100",((TextBlock)((StackPanel)QueueRows(window)[0].Children[0]).Children[0]).Text,"paging reaches requests beyond first 100");
@@ -345,7 +346,7 @@ internal static class WindowTests
         Check.True(File.Exists(Path.Combine(folder,"Artist - Batch 204.mp3")),"clear keeps downloaded audio");
         bot.Answers["queue demo"]=()=>new[]{LogicTests.Track("New queue demo")};
         window.Search("queue demo");Check.Until(()=>Rows(window).Count==1,"search usable after clearing");
-        var result=((StackPanel)typeof(SearchWindow).GetField("_results",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(window)!).Children.OfType<Grid>().First();
+        var result=((StackPanel)typeof(SearchWindow).GetField("_results",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(window)!).Children.OfType<Border>().Select(b => b.Child).OfType<Grid>().First();
         var add=result.Children.OfType<Button>().Single(b=>Equals(b.Content,"Add to queue"));
         Picture(window,"8 search and queue actions");Click(add);
         Check.Equal(1,downloads.Active.Count,"add to queue uses background lane");
@@ -363,6 +364,27 @@ internal static class WindowTests
 
     // ── looking at the window ──
 
+    private static void PlaylistTab(FakeHost host, TelegramAccount account, FakeBot bot)
+    {
+        Check.Section("complete Finder window: playlist tab and uncluttered navigation");
+        var folder = Check.NewFolder("integrated-playlist-window"); var library = new SpotifyPlaylistTests.Library();
+        library.Add(folder, "Song 0"); library.Add(Path.Combine(folder, "second/sub"), "Song 2");
+        var sources = new MusicSources(new TransferTests.Source("DeezLoad"), new TransferTests.Source("Music Hunters"), _ => { });
+        using var downloads = new Downloads(_ => { });
+        using var imports = new SpotifyPlaylists(Path.Combine(folder, "imports.json"), library, downloads, sources.Track, new PlaylistCatalog(new SpotifyPlaylistTests.Http()));
+        var task = imports.ImportAsync(SpotifyPlaylistTests.Url(1) + "\n" + SpotifyPlaylistTests.Url(2), default);
+        Check.Until(() => task.IsCompleted, "isolated playlist data prepared"); task.GetAwaiter().GetResult();
+        var window = new SearchWindow(host, account, downloads, bot.SearchAsync, playlists: imports); window.Show();
+        Field<TabControl>(window, "_tabs").SelectedIndex = 2; Dispatcher.UIThread.RunJobs();
+        Check.False(Query(window).IsEffectivelyVisible, "search box is hidden on playlist tab");
+        Check.False(Field<Border>(window, "_queueCard").IsVisible, "duplicate global queue controls are hidden on playlist tab");
+        Picture(window, "14 complete Spotify playlist screen");
+        window.Width = 480; window.Height = 740; Picture(window, "15 complete narrow Spotify playlist screen");
+        Field<TabControl>(window, "_tabs").SelectedIndex = 0; Dispatcher.UIThread.RunJobs();
+        Check.True(Query(window).IsVisible, "returning to Search restores search input");
+        window.Close();
+    }
+
     private sealed record RowView(string Title, string Details, Button Button);
 
     private static Grid Root(SearchWindow window) => (Grid)window.Content!;
@@ -370,7 +392,7 @@ internal static class WindowTests
     private static List<RowView> Rows(SearchWindow window)
     {
         var panel = (StackPanel)typeof(SearchWindow).GetField("_results",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(window)!;
-        return panel.Children.Cast<Grid>().Select(row =>
+        return panel.Children.OfType<Border>().Select(b => b.Child).OfType<Grid>().Select(row =>
         {
             var text = (StackPanel)row.Children[0];
             return new RowView(((TextBlock)text.Children[0]).Text ?? "", ((TextBlock)text.Children[1]).Text ?? "", (Button)row.Children[1]);
@@ -380,15 +402,16 @@ internal static class WindowTests
     /// <summary>Each row's button: its label, then "+" when it can be pressed and "-" when not.</summary>
     private static string Buttons(IEnumerable<RowView> rows) => string.Join(" ", rows.Select(r => r.Button.Content + (r.Button.IsEnabled ? "+" : "-")));
 
-    private static string Status(SearchWindow window) => ((Grid)Root(window).Children[3]).Children.OfType<TextBlock>().First().Text ?? "";
+    private static T Field<T>(SearchWindow window, string name) => (T)typeof(SearchWindow).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(window)!;
+    private static string Status(SearchWindow window) => Field<TextBlock>(window, "_status").Text ?? "";
 
-    private static Button DownloadAll(SearchWindow window) => ((Grid)Root(window).Children[3]).Children.OfType<Button>().First(b => "Queue all".Equals(b.Content));
+    private static Button DownloadAll(SearchWindow window) => Field<Button>(window, "_downloadAllButton");
 
-    private static Button TelegramButton(SearchWindow window) => ((Grid)Root(window).Children[3]).Children.OfType<Button>().First();
+    private static Button TelegramButton(SearchWindow window) => Field<Button>(window, "_telegramButton");
 
-    private static Button SearchButton(SearchWindow window) => ((Grid)Root(window).Children[0]).Children.OfType<Button>().First();
+    private static Button SearchButton(SearchWindow window) => Field<Button>(window, "_searchButton");
 
-    private static TextBox Query(SearchWindow window) => ((Grid)Root(window).Children[0]).Children.OfType<TextBox>().First();
+    private static TextBox Query(SearchWindow window) => Field<TextBox>(window, "_query");
 
     private static void Picture(Window window, string name)
     {
