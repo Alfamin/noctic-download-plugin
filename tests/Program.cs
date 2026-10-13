@@ -12,6 +12,16 @@ if (Environment.GetEnvironmentVariable("FMF_LIVE_ROUTE") is { Length: > 0 } link
     await LiveRouteTest.RunAsync(links, Environment.GetEnvironmentVariable("FMF_LIVE_PROXY"));
     return 0;
 }
+// With FMF_REPLAY_IMPORTS set to a copy of the plugin's saved imports (spotify-playlists.json) and
+// FMF_LIBRARY_SNAPSHOT to a library list, only the replay runs: the saved playlists are matched
+// against that library again, offline, and what changed is printed. Both files are only read.
+if (Environment.GetEnvironmentVariable("FMF_REPLAY_IMPORTS") is { Length: > 0 } replay)
+{
+    try { await LivePlaylistTest.ReplayAsync(replay, Environment.GetEnvironmentVariable("FMF_LIBRARY_SNAPSHOT")); }
+    finally { Check.RemoveFolders(); }
+    Console.WriteLine($"\n{Check.Passed} ok, {Check.Failed} wrong");
+    return Check.Failed;
+}
 try
 {
     await LogicTests.RunAsync();

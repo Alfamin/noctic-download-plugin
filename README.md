@@ -93,6 +93,16 @@ with the same name remain separate; re-pasting a link resumes its saved import. 
 checks use artist, title, version and duration. Known clean versions are not substituted for
 explicit songs; metadata alone cannot prove an untagged recording is explicit.
 
+Spotify and the files' tags write the same recording differently, and the check reads both the
+same way: an addition after a dash or in brackets (`Song - Remix`, `Song (Remix)`), a guest or
+producer named in the title (`(with Guest)`, `FEAT. GUEST`, `(prod. X)`), artists joined by `,`
+`&` `;` or `/`, and letters such as `ł` written plainly. A song that Spotify lists under another
+name than its artist (a leak under its uploader) is found when that name is the file's album
+artist and the length agrees. Lengths still have to be within three seconds, a remix or live
+version is never taken for the original, and two different additions (`Pt. 1`, `Pt. 2`) stay two
+recordings. An entry whose title and length are in the library under an unrelated artist stays
+missing, and its line says so. Saved imports are checked again with these rules when Noctis starts.
+
 Unidentified local Spotify files, podcasts, blocked metadata, unavailable recordings and bot
 limits stay listed while other tracks continue. Shared missing recordings are queued once.
 New requests wait for Start; existing download work is unaffected. Remove/retry/clear requests

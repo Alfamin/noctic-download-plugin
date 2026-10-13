@@ -6,7 +6,7 @@ using Avalonia.Threading;
 
 namespace FreeMusicFinder;
 
-internal sealed record LocalSong(Guid Id, string Artist, string Title, string Path, TimeSpan Duration, bool Explicit = false, bool Visible = true);
+internal sealed record LocalSong(Guid Id, string Artist, string Title, string Path, TimeSpan Duration, bool Explicit = false, bool Visible = true, string AlbumArtist = "");
 internal interface IPlaylistLibrary
 {
     Task<IReadOnlyList<LocalSong>> SnapshotAsync();
@@ -40,7 +40,7 @@ internal sealed class PlaylistLibrary(Func<object?>? main = null) : IPlaylistLib
             if (Get(track, "Id") is not Guid id || Get(track, "FilePath") is not string path ||
                 Get(track, "Artist") is not string artist || Get(track, "Title") is not string title ||
                 Get(track, "Duration") is not TimeSpan duration) throw Changed();
-            if (Path.IsPathFullyQualified(path)) songs.Add(new(id, artist, title, path, duration, Get(track, "IsExplicit") is true, visible.Contains(id)));
+            if (Path.IsPathFullyQualified(path)) songs.Add(new(id, artist, title, path, duration, Get(track, "IsExplicit") is true, visible.Contains(id), Get(track, "AlbumArtist") as string ?? ""));
         }
         return (IReadOnlyList<LocalSong>)songs;
     });
@@ -115,25 +115,39 @@ internal sealed class PlaylistLibrary(Func<object?>? main = null) : IPlaylistLib
 
 internal sealed class PlaylistMatcher
 {
-    private readonly Dictionary<string, LocalSong[]> _titles;
+    private readonly ILookup<string, LocalSong> _titles;
     public PlaylistMatcher(IEnumerable<LocalSong> songs)
     {
-        _titles = songs.Where(s => File.Exists(s.Path)).GroupBy(s => BotText.Key(BotText.Plain(s.Title)))
-            .ToDictionary(g => g.Key, g => g.OrderBy(s => s.Path, StringComparer.OrdinalIgnoreCase).ToArray());
+        _titles = songs.Where(s => File.Exists(s.Path)).OrderBy(s => s.Path, StringComparer.OrdinalIgnoreCase)
+            .SelectMany(s => Keys(s.Title).Select(key => (key, s))).ToLookup(pair => pair.key, pair => pair.s);
     }
-    public LocalSong? Find(MusicRequest request) => _titles.GetValueOrDefault(BotText.Key(BotText.Plain(request.Title)), [])
-        .Where(s => RecordingMatch.Fits(request, s.Artist, s.Title, s.Duration > TimeSpan.Zero ? s.Duration : null))
+    // Looked up under the title without its brackets, and under its name alone: Spotify writes
+    // "Song - Remix" and "Song (with Guest)" where the files say "Song (Remix)" and "Song".
+    private static IEnumerable<string> Keys(string title) => new[] { BotText.Key(BotText.Plain(title)), RecordingMatch.TitleKey(title) }.Distinct();
+    private IEnumerable<LocalSong> Named(string title) => Keys(title).SelectMany(key => _titles[key]).Distinct();
+    private static TimeSpan? Length(LocalSong s) => s.Duration > TimeSpan.Zero ? s.Duration : null;
+    private static bool ByArtist(MusicRequest request, LocalSong s, bool lengths = true) => RecordingMatch.Fits(request, s.Artist, s.Title, lengths ? Length(s) : null);
+    // A song put out under another name (the uploader of a leak, a compilation) often keeps that name
+    // as its album artist. That counts only together with the length.
+    private static bool ByAlbumArtist(MusicRequest request, LocalSong s) => s.AlbumArtist.Length > 0 && request.Duration is not null && Length(s) is {} length
+        && RecordingMatch.Fits(request, s.AlbumArtist, s.Title, length);
+    public LocalSong? Find(MusicRequest request) => Named(request.Title)
+        .Where(s => ByArtist(request, s) || ByAlbumArtist(request, s))
         .OrderByDescending(s => s.Visible)
+        .ThenByDescending(s => ByArtist(request, s))
         .ThenByDescending(s => request.Explicit == true && s.Explicit)
         .ThenByDescending(s => BotText.Key(request.Title) == BotText.Key(s.Title))
         .ThenBy(s => request.Seconds is {} seconds ? Math.Abs(s.Duration.TotalSeconds - seconds) : 0)
         .ThenBy(s => s.Path, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
     public string MissingReason(MusicRequest request)
     {
-        var candidates = _titles.GetValueOrDefault(BotText.Key(BotText.Plain(request.Title)), [])
-            .Where(s => RecordingMatch.Fits(request with { Seconds = null }, s.Artist, s.Title, null)).ToArray();
+        var named = Named(request.Title).ToArray();
+        var candidates = named.Where(s => ByArtist(request with { Seconds = null }, s, lengths: false)).ToArray();
         if (request.Seconds is {} seconds && candidates.Where(s => s.Duration > TimeSpan.Zero).OrderBy(s => Math.Abs(s.Duration.TotalSeconds - seconds)).FirstOrDefault() is {} near)
             return $"Different recording length: Spotify {TimeSpan.FromSeconds(seconds):m\\:ss}, local {near.Duration:m\\:ss}. A different version will not be substituted.";
+        // The same title and length under a name Spotify does not give: likely the same song, but not known to be.
+        if (request.Duration is not null && named.FirstOrDefault(s => Length(s) is not null && ByArtist(request with { Artist = s.Artist }, s)) is {} other)
+            return $"Same title and length in your library, but by {other.Artist}. It is not taken for the same recording without a shared artist.";
         return "No matching local recording (artist, title and version checked)";
     }
 }

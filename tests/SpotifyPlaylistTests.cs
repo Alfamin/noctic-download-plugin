@@ -79,6 +79,19 @@ internal static class SpotifyPlaylistTests
         Check.Equal<LocalSong?>(null, new PlaylistMatcher(library.Songs).Find(new("Song 1 (Remix)", "Artist", 180)), "remix is not an original");
         Check.Equal<LocalSong?>(null, new PlaylistMatcher(library.Songs).Find(new("Song 1", "Artist", 400)), "duration mismatch stays missing");
         Check.True(new PlaylistMatcher(library.Songs).MissingReason(new("Song 1", "Artist", 400)).Contains("Different recording length"), "same-name wrong-length recordings explain why they were not matched");
+        // Spotify's way of writing a title against the tags of the files.
+        var bonus = library.Add(folder, "Song 9 (Bonus)"); var guest = library.Add(folder, "Song 8", "Artist; Guest");
+        Check.Equal(bonus.Id, new PlaylistMatcher(library.Songs).Find(new("Song 9 - Bonus", "Artist", 180))?.Id, "\"Song - Bonus\" finds the file tagged \"Song (Bonus)\"");
+        Check.Equal(guest.Id, new PlaylistMatcher(library.Songs).Find(new("Song 8 (with Guest)", "Guest, Artist", 180))?.Id, "a guest in Spotify's title and a semicolon in the file's artists");
+        // A leak: on Spotify under its uploader's name, in the library under the artist's, with the uploader as album artist.
+        var leak = library.Add(folder, "Song 7", "Real Artist", 129) with { AlbumArtist = "Uploader" };
+        var official = library.Add(folder, "Song 7", "Uploader", 129);
+        Check.Equal(leak.Id, new PlaylistMatcher(new[] { leak }).Find(new("Song 7", "uploader", 128.9))?.Id, "the album artist counts when title and length agree");
+        Check.Equal<LocalSong?>(null, new PlaylistMatcher(new[] { leak }).Find(new("Song 7", "uploader", 160)), "not with another length");
+        Check.Equal<LocalSong?>(null, new PlaylistMatcher(new[] { leak }).Find(new("Song 7", "uploader")), "and not without a length");
+        Check.Equal(official.Id, new PlaylistMatcher(new[] { leak, official }).Find(new("Song 7", "Uploader", 129))?.Id, "a file by the artist itself comes before one that only has it as album artist");
+        Check.Equal<LocalSong?>(null, new PlaylistMatcher(new[] { leak }).Find(new("Song 7", "Somebody Else", 129)), "the same title and length under an unrelated name is not taken");
+        Check.True(new PlaylistMatcher(new[] { leak }).MissingReason(new("Song 7", "Somebody Else", 129)).Contains("but by Real Artist"), "and the list says that such a song is there, and by whom");
         var hidden = library.Add(folder, "Hidden song") with { Visible = false };
         Check.Equal(hidden.Id, new PlaylistMatcher(new[] { hidden }).Find(new("Hidden song", "Artist", 180))!.Id, "hidden local recording is found rather than downloaded twice");
         File.Delete(a.Path);

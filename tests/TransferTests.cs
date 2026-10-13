@@ -56,6 +56,20 @@ internal static class TransferTests
         Check.False(RecordingMatch.Fits(new("Same Song","Drake",180),"Drake Bell","Same Song",TimeSpan.FromSeconds(180)),"artist substring does not accept another performer");
         Check.True(RecordingMatch.Fits(new("Song","Artist feat. Guest",180),"Artist","Song",TimeSpan.FromSeconds(180)),"guest-credit differences retain the primary artist");
         Check.True(RecordingMatch.Fits(new("Scared Of Love (with instrumental by Ghost Loft)","Juice WRLD",170),"Juice Wrld","Scared Of Love",TimeSpan.FromSeconds(170)),"production credits are not mistaken for an instrumental recording");
+        // The same recording as Spotify writes it and as the files the bots send are tagged.
+        static TimeSpan s(int seconds)=>TimeSpan.FromSeconds(seconds);
+        Check.True(RecordingMatch.Fits(new("Night Drive (with Guest) - Remix","Singer, Guest",222.4),"Singer, Guest","Night Drive (Remix)",s(222)),"\"(with Guest) - Remix\" is \"(Remix)\"");
+        Check.True(RecordingMatch.Fits(new("Night Drive - Bonus","Singer"),"Singer","Night Drive (Bonus)",null),"\"- Bonus\" is \"(Bonus)\", also when no length is known");
+        Check.True(RecordingMatch.Fits(new("HEART. FEAT. GUEST.","Singer, Guest",213.4),"Singer, Guest","HEART.",s(213)),"a guest named in the title without brackets");
+        Check.True(RecordingMatch.Fits(new("Night Drive","Singer"),"Singer","Night Drive (prod. Somebody)",null),"a producer named in the title");
+        Check.True(RecordingMatch.Fits(new("Night Drive","Dawid Podsiadło",243),"Dawid Podsiadlo","Night Drive",s(243)),"a letter Unicode does not take apart (ł) written plainly in the file");
+        Check.True(RecordingMatch.Fits(new("Night Drive","Guest, Singer",186),"Singer; Guest","Night Drive",s(186)),"artists joined by a semicolon in the file's tag");
+        Check.True(RecordingMatch.Fits(new("Night Drive - Remastered 2011","Singer",200),"Singer","Night Drive",s(201)),"an addition one side leaves out, with the lengths agreeing");
+        Check.False(RecordingMatch.Fits(new("Night Drive - Remastered 2011","Singer"),"Singer","Night Drive",null),"but not when no length says so");
+        Check.False(RecordingMatch.Fits(new("Night Drive - Pt. 1","Singer",200),"Singer","Night Drive - Pt. 2",s(200)),"two different additions are two recordings, even at the same length");
+        Check.False(RecordingMatch.Fits(new("Night Drive - Remix","Singer",200),"Singer","Night Drive",s(200)),"a remix written Spotify's way is still not the original");
+        Check.False(RecordingMatch.Fits(new("Night Drive (with Guest)","Singer",200),"Singer","Night Drive Home",s(200)),"another title stays another song");
+        Check.False(RecordingMatch.Fits(new("Dancing with a Stranger","Singer",200),"Singer","Dancing",s(200)),"\"with\" inside a title is part of the title");
         var local=PlaylistCatalog.ParseLocal("spotify:local:::Juice+WRLD+-+Unreleased+Song:248",["Juice WRLD"]);
         Check.Equal("Juice WRLD",local!.Artist,"local-file artist/title delimiter is read from metadata");
         Check.Equal("Unreleased Song",local.Title,"local title preserved");

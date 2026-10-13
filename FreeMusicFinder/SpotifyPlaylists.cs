@@ -165,7 +165,7 @@ internal sealed class SpotifyPlaylists : IDisposable
     private static int Stamp(IEnumerable<LocalSong> songs)
     {
         var hash = new HashCode();
-        foreach (var s in songs) { hash.Add(s.Id); hash.Add(s.Path); hash.Add(s.Title); hash.Add(s.Artist); hash.Add(s.Duration); hash.Add(s.Explicit); hash.Add(s.Visible); }
+        foreach (var s in songs) { hash.Add(s.Id); hash.Add(s.Path); hash.Add(s.Title); hash.Add(s.Artist); hash.Add(s.Duration); hash.Add(s.Explicit); hash.Add(s.Visible); hash.Add(s.AlbumArtist); }
         return hash.ToHashCode();
     }
     private async Task Reconcile(SpotifyPlaylist job, PlaylistMatcher matcher)

@@ -67,10 +67,51 @@ internal static class RecordingMatch
         foreach (var version in new[]{"live","remix","instrumental","acoustic","cover","sped up","slowed"})
             if (Regex.IsMatch(Versions(wanted.Title), @"\b"+version+@"\b",RegexOptions.IgnoreCase) != Regex.IsMatch(Versions(title),@"\b"+version+@"\b",RegexOptions.IgnoreCase)) return false;
         if (wanted.Duration is {} length && duration is {} other && Math.Abs((length-other).TotalSeconds)>3) return false;
-        static IEnumerable<string> ArtistKeys(string value)=>Regex.Split(value,@"\s*(?:,|&|\bfeat\.?|\bft\.?|\bfeaturing\b)\s*",RegexOptions.IgnoreCase).Select(BotText.Key).Where(k=>k.Length>0);
-        var a=BotText.Key(wanted.Artist); var b=BotText.Key(artist);
+        // Several artists are written "A, B", "A & B", "A feat. B"; tags also join them as "A; B" and "A/B".
+        static IEnumerable<string> ArtistKeys(string value)=>Regex.Split(value,@"\s*(?:,|&|;|/|\bfeat\.?|\bft\.?|\bfeaturing\b)\s*",RegexOptions.IgnoreCase).Select(Key).Where(k=>k.Length>0);
+        var a=Key(wanted.Artist); var b=Key(artist);
         if(a.Length==0 || b.Length==0 || !(a==b || ArtistKeys(wanted.Artist).Intersect(ArtistKeys(artist)).Any())) return false;
-        return BotText.Key(wanted.Title)==BotText.Key(title) || wanted.Duration is not null && duration is not null && BotText.Key(BotText.Plain(wanted.Title))==BotText.Key(BotText.Plain(title));
+        var lengths=wanted.Duration is not null && duration is not null;
+        if(Key(wanted.Title)==Key(title) || lengths && Key(BotText.Plain(wanted.Title))==Key(BotText.Plain(title))) return true;
+        // The same title written another way.
+        var (name,extras)=Title(wanted.Title); var (otherName,otherExtras)=Title(title);
+        if(name!=otherName) return false;
+        if(extras.SetEquals(otherExtras)) return true;
+        // One names an addition the other leaves out ("- Remastered 2011", "(Bonus)"): the same recording when the
+        // lengths say so. Two different additions ("- Pt. 1", "- Pt. 2") are two recordings.
+        return lengths && (extras.IsSubsetOf(otherExtras) || otherExtras.IsSubsetOf(extras));
+    }
+
+    /// <summary>The key playlist entries and library songs are looked up by: the title without its additions and credits.</summary>
+    public static string TitleKey(string title)=>Title(title).Name;
+
+    /// <summary>
+    /// A title taken apart the same way however it is written. Spotify writes "Girls Need Love (with Drake) - Remix"
+    /// and "LOVE. FEAT. ZACARI."; the files the bots send say "Girls Need Love (Remix)" and "LOVE.". The name is what
+    /// comes first; additions are what stands in brackets or after " - "; who else is on it (feat., with, prod.) is
+    /// said by the artist and left out.
+    /// </summary>
+    private static (string Name,HashSet<string> Extras) Title(string title)
+    {
+        var extras=new HashSet<string>(StringComparer.Ordinal);
+        void Add(string text){if(!Regex.IsMatch(text,@"^\s*(?:feat|ft|featuring|with|prod|produced by)\b",RegexOptions.IgnoreCase) && Key(text) is {Length:>0} key)extras.Add(key);}
+        var rest=title;
+        for(var depth=0;depth<4;depth++) // brackets inside brackets, from the inside out
+        {
+            var before=rest;rest=Regex.Replace(rest,@"\([^()]*\)|\[[^\[\]]*\]",m=>{Add(m.Value[1..^1]);return " ";});
+            if(rest==before)break;
+        }
+        var pieces=Regex.Split(rest,@"\s+[-–—]\s+");
+        foreach(var piece in pieces.Skip(1))Add(piece);
+        var name=Key(Regex.Replace(pieces[0],@"\s(?:feat|ft|featuring|prod|produced by)\b\.?\s*\S.*$","",RegexOptions.IgnoreCase));
+        return (name.Length>0?name:Key(title),extras);
+    }
+
+    // BotText.Key and the letters Unicode does not take apart: "Podsiadło" is written "Podsiadlo" in many files.
+    private static string Key(string? text)
+    {
+        var key=BotText.Key(text);
+        return key.AsSpan().IndexOfAny("łøđðßæœıþ")<0?key:key.Replace("ł","l").Replace("ø","o").Replace("đ","d").Replace("ð","d").Replace("ß","ss").Replace("æ","ae").Replace("œ","oe").Replace("ı","i").Replace("þ","th");
     }
 }
 
