@@ -50,7 +50,47 @@ internal static class WindowTests
 
         Plugin(music, folder);
         QueueControls(host, LoggedIn(host), bot);
+        QueueStart(host, bot);
         PlaylistTab(host, LoggedIn(host), bot);
+    }
+
+    /// <summary>Songs queued from a playlist wait for a start of their own. The queue's one button gives it.</summary>
+    private static void QueueStart(FakeHost host, FakeBot bot)
+    {
+        Check.Section("the queue's button starts everything: a paused queue and songs staged from a playlist alike");
+        var folder = Check.NewFolder("queue-start");
+        using (var downloads = new Downloads(host.Log))
+        {
+            downloads.SetPaused(true);
+            downloads.Start(LogicTests.Track("Staged one"), folder, held: true); downloads.Start(LogicTests.Track("Staged two"), folder, held: true);
+            var window = new SearchWindow(host, LoggedIn(host), downloads, bot.SearchAsync); window.Show();
+            var toggle = Field<Button>(window, "_pauseButton");
+            Check.Until(() => Equals(toggle.Content, "Start queued downloads"), "with songs staged from a playlist the button says Start queued downloads, not Resume queue");
+            Click(window.GetVisualDescendants().OfType<Button>().Single(b => Equals(b.Content, "Manage queue")));
+            Check.True(((TextBlock)((StackPanel)QueueRows(window)[0].Children[0]).Children[1]).Text!.EndsWith("Ready · press Start queued downloads"), "and each staged song names that button");
+            Click(toggle);
+            Check.Until(() => downloads.Active.Count == 0 && downloads.History.Count(d => d.State == DownloadState.Saved) == 2, "one press downloads them, although the queue was paused as well");
+            Check.False(downloads.Paused, "the pause is lifted with it");
+            Check.Until(() => Equals(toggle.Content, "Pause queue"), "after which the button offers to pause");
+            Click(toggle);
+            Check.True(downloads.Paused, "which pauses");
+            downloads.Start(LogicTests.Track("Plain one"), folder);
+            Check.Until(() => Equals(toggle.Content, "Resume queue"), "a paused queue without staged songs says Resume queue");
+            Click(toggle);
+            Check.Until(() => downloads.Active.Count == 0 && !downloads.Paused, "which resumes it");
+            window.Close();
+        }
+        using (var downloads = new Downloads(host.Log))
+        using (var nobody = new TelegramAccount(Path.Combine(host.DataDirectory, "nobody-queue.dat"), () => ""))
+        {
+            downloads.Start(LogicTests.Track("Staged three"), folder, held: true);
+            var window = new SearchWindow(host, nobody, downloads, bot.SearchAsync); window.Show();
+            var toggle = Field<Button>(window, "_pauseButton");
+            Check.Until(() => Equals(toggle.Content, "Start queued downloads"), "not logged in, the button still offers the start");
+            Click(toggle);
+            Check.True(downloads.Active.Single().Held && Status(window).Contains("Log in to Telegram"), "but starts nothing and says to log in first");
+            window.Close();
+        }
     }
 
     private static void NotLoggedIn(FakeHost host, Downloads downloads, FakeBot bot)
@@ -238,7 +278,7 @@ internal static class WindowTests
         File.SetLastWriteTimeUtc(dead, DateTime.UtcNow.AddHours(-1));
 
         var plugin = new FreeMusicPlugin();
-        Check.Equal("2.6.3", plugin.Info.Version, "the version is the one in plugin.json");
+        Check.Equal("2.6.4", plugin.Info.Version, "the version is the one in plugin.json");
         plugin.Initialize(host);
         Check.Equal("Find more by this artist…", string.Join(",", host.Commands.Select(c => c.Label)), "one track menu entry");
         Check.Until(() => !File.Exists(dead), "what an interrupted download left behind is removed at the start");

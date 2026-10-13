@@ -12,7 +12,7 @@ You need: Noctis 1.5.3 or newer, a Telegram account, and the file
 **New in 2.6:** the **Playlists** tab brings your Spotify playlists into Noctis using the music
 you already have. Paste several playlist links, one per line → **Create playlists** → review
 **Missing songs** → **Queue all missing songs** → **Start queued downloads**. For one playlist
-alone, press its **Missing songs** and then **Queue these songs**. Shared songs use
+alone, click that playlist and then **Queue these songs**. Shared songs use
 one local file, in every playlist's original order. You can create playlists before logging
 in to Telegram. Downloads need Telegram and your normal download folder to be in Noctis's
 library (or add it/rescan). **Check library again** fills local gaps; Spotify refetch is deferred.
@@ -109,6 +109,8 @@ remaining recordings are requested individually, so the backup receives only unf
 
 - The progress bar counts saved downloads; metadata collection has its own visible status.
 - **Pause queue** pauses batch work after the current request; **Download now** still works. **Resume queue** continues the batch.
+  Songs queued from the Playlists tab wait until you start them: while any are waiting, the same button reads
+  **Start queued downloads**, and one press starts them and lifts a pause.
 - Closing Noctis saves unfinished work and resumes it when Noctis runs again.
 - Bot limits and retry times are tracked separately. When both are unavailable, work waits.
 - Telegram-wide waits affect both bots. Source switching does not avoid that wait.

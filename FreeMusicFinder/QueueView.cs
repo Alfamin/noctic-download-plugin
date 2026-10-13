@@ -98,7 +98,7 @@ internal sealed class QueueView : Grid
                 DownloadState.Running => _item.Progress > 0 ? $"Downloading {_item.Progress:P0}" : "Requesting file…",
                 DownloadState.Waiting => $"Waiting · {_item.RetryAt?.ToLocalTime():ddd HH:mm}",
                 DownloadState.Failed => "Failed · " + _item.Error,
-                _ => _item.Held ? "Ready · start playlist downloads to continue" : _item.Priority ? "Next to download" : "Queued",
+                _ => _item.Held ? "Ready · press Start queued downloads" : _item.Priority ? "Next to download" : "Queued",
             });
             ToolTip.SetTip(_state, string.IsNullOrEmpty(_item.Error) ? null : _item.Error);
             _next.IsEnabled = _item.State==DownloadState.Failed || (_item.IsActive && _item.State != DownloadState.Running && !_item.Priority);

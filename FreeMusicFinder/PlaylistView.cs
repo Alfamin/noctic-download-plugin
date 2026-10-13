@@ -1,8 +1,10 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 
 namespace FreeMusicFinder;
 
@@ -117,17 +119,24 @@ internal sealed class PlaylistView : Grid, IDisposable
                 text.Children.Add(new TextBlock { Text = job.Status, TextWrapping = TextWrapping.Wrap, Opacity = 0.75 });
                 var show = new Button { Content = "Missing songs", IsEnabled = job.Manifest is { CompleteIds: true } };
                 ToolTip.SetTip(show, "List this playlist's missing songs below. From there they can be queued on their own.");
-                show.Click += (_, _) =>
+                void Pick()
                 {
                     _selected = job; _index = 0; Refresh(false);
                     Dispatcher.UIThread.Post(() => { if (!_disposed) _queueOne.BringIntoView(); });
-                };
+                }
+                show.Click += (_, _) => Pick();
                 var remove = new Button { Content = "Remove import", IsEnabled = !_imports.Busy };
                 ToolTip.SetTip(remove, "Stop filling this import. Its Noctis playlist and music are kept.");
                 remove.Click += (_, _) => Act(() => _imports.RemoveAsync(job));
                 row.Children.Add(text); Grid.SetColumn(show, 1); row.Children.Add(show); Grid.SetColumn(remove, 2); row.Children.Add(remove);
                 // The one whose missing songs are listed below is marked.
                 var card = FinderTheme.Card(row, 12); if (ReferenceEquals(job, _selected)) card.Classes.Add("finder-selected");
+                if (show.IsEnabled)
+                {
+                    // A click anywhere on the card picks the playlist, as its "Missing songs" button does; the buttons keep their own clicks.
+                    card.Classes.Add("finder-pick"); card.Cursor = new Cursor(StandardCursorType.Hand);
+                    card.Tapped += (_, e) => { if ((e.Source as Visual)?.FindAncestorOfType<Button>(includeSelf: true) is null) Pick(); };
+                }
                 _lists.Children.Add(card);
             }
         }

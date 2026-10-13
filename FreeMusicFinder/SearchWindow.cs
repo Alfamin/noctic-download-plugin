@@ -111,8 +111,8 @@ internal sealed class SearchWindow : Window
 
         _queueStatus=new TextBlock {TextWrapping=TextWrapping.Wrap,Opacity=0.8,Margin=new Thickness(0,8,0,4)};
         _queueProgress=new ProgressBar {Minimum=0,Maximum=100,Height=5,Margin=new Thickness(0,0,0,8)};
-        _pauseButton=new Button {Content=_downloads.Paused?"Resume queue":"Pause queue"};
-        _pauseButton.Click+=(_,_)=>{try {_downloads.SetPaused(!_downloads.Paused);ShowQueue();}catch(Exception ex){_status.Text="Could not save queue: "+ex.Message;}};
+        _pauseButton=new Button();
+        _pauseButton.Click+=(_,_)=>{try {ToggleQueue();ShowQueue();}catch(Exception ex){_status.Text="Could not save queue: "+ex.Message;}};
         var retry=new Button {Content="Retry failed",Margin=new Thickness(8,0,0,0)};
         retry.Click+=(_,_)=>{try {_downloads.RetryFailed();_transfers?.RetryIncomplete();ShowQueue();}catch(Exception ex){_status.Text="Could not retry: "+ex.Message;}};
         var manage=new Button {Content="Manage queue",Margin=new Thickness(8,0,0,0)};
@@ -410,6 +410,19 @@ internal sealed class SearchWindow : Window
         });
 
     private void OnTransferChanged(string text)=>Dispatcher.UIThread.Post(()=>{if(!_closed.IsCancellationRequested){_status.Text=text;ShowQueue();}});
+
+    /// <summary>
+    /// The one button that makes the queue go or stop. Songs queued from a playlist wait for a start of
+    /// their own, so lifting the pause alone left them waiting and the button seemed to do nothing:
+    /// whatever makes the queue go starts them as well.
+    /// </summary>
+    private void ToggleQueue()
+    {
+        var staged = _downloads.Active.Any(d => d.Held);
+        if (!staged && !_downloads.Paused) { _downloads.SetPaused(true); return; }
+        if (staged && !_telegram.IsLoggedIn) { _status.Text = "Log in to Telegram below, then start queued downloads. Your queue is kept."; return; }
+        _downloads.ReleaseHeld(); _downloads.SetPaused(false);
+    }
     private void ShowQueue()
     {
         var all=_downloads.History;var done=all.Count(d=>d.State is DownloadState.Saved or DownloadState.AlreadyThere);
@@ -418,10 +431,13 @@ internal sealed class SearchWindow : Window
         _queueStatus.Text=all.Count==0?"Paste a playlist link to start a saved import.":$"{done} saved / {all.Count} queued · {pending} pending · {failed} need retry";
         if(waiting.Length>0 && waiting.Min(d=>d.RetryAt) is {} retry) _queueStatus.Text+=$" · next check {retry.ToLocalTime():ddd HH:mm}";
         if(_downloads.Paused) _queueStatus.Text+=" · paused after the current request";
-        if (_downloads.Active.Count(d => d.Held) is > 0 and var held) _queueStatus.Text += $" · {held} ready to start in Playlists";
+        var held = _downloads.Active.Count(d => d.Held);
+        if (held > 0) _queueStatus.Text += $" · {held} ready: press Start queued downloads";
         if(_transfers?.Jobs.Count(j=>!j.Complete)>0) _queueStatus.Text+=" · playlist collection continues";
         _queueProgress.Value=all.Count>0?100.0*done/all.Count:0;
-        _pauseButton.Content=_downloads.Paused?"Resume queue":"Pause queue";
+        _pauseButton.Content=held>0?"Start queued downloads":_downloads.Paused?"Resume queue":"Pause queue";
+        // Coloured while there is something for it to start.
+        _pauseButton.Classes.Set("finder-primary",held>0 || _downloads.Paused && pending>0);
         _queueTab.Header=$"Queue ({pending+failed})";
         _queueView.Refresh();
         _queueCard.IsVisible = _tabs.SelectedIndex != 2 && (all.Count > 0 || _transfers?.Jobs.Any(j => !j.Complete) == true);

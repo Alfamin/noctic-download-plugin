@@ -1,6 +1,8 @@
 using System.Reflection;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -34,8 +36,22 @@ internal static class PlaylistWindowTests
         Click(Show(1));
         Check.Until(() => Field<TextBlock>(view, "_details").Text!.Contains("1/3"), "Missing songs on another playlist lists that playlist's");
         Check.True(!Marked(0) && Marked(1), "and marks it instead");
-        Click(Show(0));
-        Check.Until(() => Field<TextBlock>(view, "_details").Text!.Contains("2/4") && Field<Button>(view, "_queueOne") is { IsVisible: true, IsEnabled: true }, "back on the first, its own queue button is ready");
+        // A click anywhere on a playlist's card does the same, sent as a real press and release of the mouse.
+        void Tap(Control control, double x, double y)
+        {
+            Dispatcher.UIThread.RunJobs();
+            var at = control.TranslatePoint(new Point(x, y), window)!.Value;
+            window.MouseDown(at, MouseButton.Left); window.MouseUp(at, MouseButton.Left);
+            Dispatcher.UIThread.RunJobs();
+        }
+        Border Card(int playlist) => Show(playlist).GetVisualAncestors().OfType<Border>().First(b => b.Classes.Contains("finder-card"));
+        Tap(Card(0), 24, 24);
+        Check.Until(() => Field<TextBlock>(view, "_details").Text!.Contains("2/4") && Marked(0) && !Marked(1), "a click on a playlist's name, not only on its button, lists its missing songs");
+        Tap(Show(1), 10, 10);
+        Check.Until(() => Field<TextBlock>(view, "_details").Text!.Contains("1/3") && Marked(1), "the Missing songs button still does, pressed with the mouse");
+        Tap(Card(0), Card(0).Bounds.Width / 2, Card(0).Bounds.Height - 6);
+        Check.Until(() => Field<TextBlock>(view, "_details").Text!.Contains("2/4") && Field<Button>(view, "_queueOne") is { IsVisible: true, IsEnabled: true }, "a click on the card's empty part does too; its own queue button is ready");
+        Check.Equal(2, imports.Jobs.Count, "clicking around the cards removed no import");
         Click(Field<Button>(view, "_queueOne"));
         Check.Until(() => downloads.Active.Count == 1 && !imports.Busy, "Queue these songs queues the picked playlist's missing song and no other playlist's");
         Check.Until(() => Field<TextBlock>(view, "_status").Text!.Contains("from \"Feeling Shit\""), "the status names the playlist that was queued");
