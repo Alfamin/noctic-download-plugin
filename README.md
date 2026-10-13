@@ -85,7 +85,9 @@ was closed in the middle of it is removed at the next start.
 1. Open **Playlists**, paste full Spotify playlist links (one per line), and choose **Create playlists**.
 2. Review the matched/total counts and **Missing songs**. Matching reads your scanned local
    library across subfolders and multiple roots; no Telegram login is needed.
-3. Choose **Queue missing songs**, then **Start queued downloads**. Log in to Telegram if needed.
+3. Choose **Queue all missing songs** for every playlist, or press one playlist's **Missing songs**
+   and then **Queue these songs** for that playlist alone (the playlist listed is the one with the
+   coloured border). Then **Start queued downloads**. Log in to Telegram if needed.
 
 These are normal Noctis playlists named after Spotify, using shared file references. Audio is
 not copied or moved. Original order and duplicate entries are retained. Different playlists

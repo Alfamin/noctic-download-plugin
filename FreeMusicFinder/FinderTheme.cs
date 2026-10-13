@@ -37,6 +37,9 @@ internal static class FinderTheme
         card.Setters.Add(new Setter(Border.BorderThicknessProperty, new Thickness(1)));
         card.Setters.Add(new Setter(Border.CornerRadiusProperty, new CornerRadius(12)));
         window.Styles.Add(card);
+        var selected = new Style(s => s.OfType<Border>().Class("finder-card").Class("finder-selected"));
+        selected.Setters.Add(new Setter(Border.BorderBrushProperty, Resource("FinderAccent")));
+        window.Styles.Add(selected);
         var input = new Style(s => s.OfType<TextBox>());
         input.Setters.Add(new Setter(TemplatedControl.CornerRadiusProperty, new CornerRadius(8)));
         input.Setters.Add(new Setter(TemplatedControl.PaddingProperty, new Thickness(12, 10)));

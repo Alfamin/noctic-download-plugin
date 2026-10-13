@@ -27,6 +27,18 @@ internal static class PlaylistWindowTests
         Check.Until(() => imports.Jobs.Count == 2 && imports.Jobs.All(j => j.Created) && !imports.Busy, "multi-playlist paste creates both playlists from screen");
         Check.Until(() => Field<Button>(view, "_queue").IsEnabled, "queue button appears after matching");
         Check.True(Field<TextBlock>(view, "_details").Text!.Contains("2/4"), "exact found/total summary visible");
+        // One playlist's missing songs: picked with its "Missing songs" button, queued with "Queue these songs".
+        Button Show(int playlist) => view.GetVisualDescendants().OfType<Button>().Where(b => Equals(b.Content, "Missing songs")).ElementAt(playlist);
+        bool Marked(int playlist) => Show(playlist).GetVisualAncestors().OfType<Border>().First(b => b.Classes.Contains("finder-card")).Classes.Contains("finder-selected");
+        Check.True(Marked(0) && !Marked(1), "the playlist whose missing songs are listed is marked");
+        Click(Show(1));
+        Check.Until(() => Field<TextBlock>(view, "_details").Text!.Contains("1/3"), "Missing songs on another playlist lists that playlist's");
+        Check.True(!Marked(0) && Marked(1), "and marks it instead");
+        Click(Show(0));
+        Check.Until(() => Field<TextBlock>(view, "_details").Text!.Contains("2/4") && Field<Button>(view, "_queueOne") is { IsVisible: true, IsEnabled: true }, "back on the first, its own queue button is ready");
+        Click(Field<Button>(view, "_queueOne"));
+        Check.Until(() => downloads.Active.Count == 1 && !imports.Busy, "Queue these songs queues the picked playlist's missing song and no other playlist's");
+        Check.Until(() => Field<TextBlock>(view, "_status").Text!.Contains("from \"Feeling Shit\""), "the status names the playlist that was queued");
         Click(Field<Button>(view, "_queue"));
         Check.Until(() => downloads.Active.Count == 2, "screen queues only unique missing songs");
         Check.Until(() => Field<Button>(view, "_start").IsEnabled, "Start queued downloads is visible and enabled");

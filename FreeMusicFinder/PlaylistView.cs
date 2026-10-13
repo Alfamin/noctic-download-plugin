@@ -20,7 +20,8 @@ internal sealed class PlaylistView : Grid, IDisposable
     private readonly TextBlock _details = new() { TextWrapping = TextWrapping.Wrap, FontWeight = FontWeight.SemiBold };
     private readonly TextBlock _page = new() { TextWrapping = TextWrapping.Wrap };
     private readonly Button _create = new() { Content = "Create playlists" };
-    private readonly Button _queue = new() { Content = "Queue missing songs" };
+    private readonly Button _queue = new() { Content = "Queue all missing songs" };
+    private readonly Button _queueOne = new() { Content = "Queue these songs", IsVisible = false, VerticalAlignment = VerticalAlignment.Center };
     private readonly Button _start = new() { Content = "Start queued downloads" };
     private readonly Button _check = new() { Content = "Check library again" };
     private readonly Button _cancel = new() { Content = "Stop import", IsVisible = false };
@@ -46,7 +47,13 @@ internal sealed class PlaylistView : Grid, IDisposable
         Grid.SetRow(_progress, 1); Children.Add(_progress);
         _status.Margin = new Thickness(0, 8); Grid.SetRow(_status, 2); Children.Add(_status);
         var content = new StackPanel { Spacing = 12 };
-        content.Children.Add(_lists); content.Children.Add(_details); content.Children.Add(_missing);
+        // The playlist picked with its "Missing songs" button: its name and counts, and the button for its songs alone.
+        var picked = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 8 };
+        _details.VerticalAlignment = VerticalAlignment.Center;
+        picked.Children.Add(_details); Grid.SetColumn(_queueOne, 1); picked.Children.Add(_queueOne);
+        ToolTip.SetTip(_queue, "The missing songs of every imported playlist. A song several playlists share is queued once.");
+        ToolTip.SetTip(_queueOne, "Only this playlist's missing songs. Nothing downloads until you press Start queued downloads.");
+        content.Children.Add(_lists); content.Children.Add(picked); content.Children.Add(_missing);
         var pages = new WrapPanel();
         foreach (var control in new Control[] { _previous, _page, _next }) { control.Margin = new Thickness(0, 0, 8, 6); pages.Children.Add(control); }
         content.Children.Add(pages);
@@ -58,6 +65,7 @@ internal sealed class PlaylistView : Grid, IDisposable
             finally { _importStop.Dispose(); _importStop = null; }
         });
         _queue.Click += (_, _) => Act(async () => { await _imports.QueueMissingAsync(_folder()); });
+        _queueOne.Click += (_, _) => { if (_selected is {} job) Act(async () => { await _imports.QueueMissingAsync(_folder(), only: job); }); };
         _start.Click += (_, _) => Act(() =>
         {
             if (!_loggedIn()) throw new InvalidOperationException("Log in to Telegram below, then start queued downloads. Your imported playlists are ready.");
@@ -96,7 +104,8 @@ internal sealed class PlaylistView : Grid, IDisposable
         _start.IsEnabled = _downloads.Active.Any(d => d.Held) || _downloads.Paused && _downloads.Active.Count > 0;
         _cancel.IsVisible = _importStop is not null;
         _progress.IsVisible = _progress.IsIndeterminate = _imports.Busy;
-        var stamp = string.Join("\n", jobs.Select(j => j.LibraryId + "|" + j.Manifest?.Name + "|" + j.Status + "|" + _imports.Busy));
+        if (_selected is null || !jobs.Contains(_selected)) _selected = jobs.FirstOrDefault(j => j.Manifest is { CompleteIds: true });
+        var stamp = string.Join("\n", jobs.Select(j => j.LibraryId + "|" + j.Manifest?.Name + "|" + j.Status + "|" + _imports.Busy + "|" + ReferenceEquals(j, _selected)));
         if (stamp != _listStamp)
         {
             _listStamp = stamp; _lists.Children.Clear();
@@ -107,21 +116,29 @@ internal sealed class PlaylistView : Grid, IDisposable
                 text.Children.Add(new TextBlock { Text = job.Manifest is {} m ? SpotifyPlaylists.DisplayName(m.Name) : "Spotify playlist", FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap });
                 text.Children.Add(new TextBlock { Text = job.Status, TextWrapping = TextWrapping.Wrap, Opacity = 0.75 });
                 var show = new Button { Content = "Missing songs", IsEnabled = job.Manifest is { CompleteIds: true } };
-                show.Click += (_, _) => { _selected = job; _index = 0; RefreshMissing(); };
+                ToolTip.SetTip(show, "List this playlist's missing songs below. From there they can be queued on their own.");
+                show.Click += (_, _) =>
+                {
+                    _selected = job; _index = 0; Refresh(false);
+                    Dispatcher.UIThread.Post(() => { if (!_disposed) _queueOne.BringIntoView(); });
+                };
                 var remove = new Button { Content = "Remove import", IsEnabled = !_imports.Busy };
                 ToolTip.SetTip(remove, "Stop filling this import. Its Noctis playlist and music are kept.");
                 remove.Click += (_, _) => Act(() => _imports.RemoveAsync(job));
-                row.Children.Add(text); Grid.SetColumn(show, 1); row.Children.Add(show); Grid.SetColumn(remove, 2); row.Children.Add(remove); _lists.Children.Add(FinderTheme.Card(row, 12));
+                row.Children.Add(text); Grid.SetColumn(show, 1); row.Children.Add(show); Grid.SetColumn(remove, 2); row.Children.Add(remove);
+                // The one whose missing songs are listed below is marked.
+                var card = FinderTheme.Card(row, 12); if (ReferenceEquals(job, _selected)) card.Classes.Add("finder-selected");
+                _lists.Children.Add(card);
             }
         }
-        if (_selected is null || !jobs.Contains(_selected)) _selected = jobs.FirstOrDefault(j => j.Manifest is { CompleteIds: true });
         RefreshMissing();
     }
     private void RefreshMissing()
     {
         var job = _selected; _missing.Children.Clear();
-        if (job?.Manifest is not {} manifest) { _details.Text = ""; _page.Text = ""; _previous.IsVisible = _next.IsVisible = false; return; }
+        if (job?.Manifest is not {} manifest) { _details.Text = ""; _page.Text = ""; _previous.IsVisible = _next.IsVisible = _queueOne.IsVisible = false; return; }
         var missing = manifest.Entries.Where(e => !job.Matches.ContainsKey(e.Position)).ToArray();
+        _queueOne.IsVisible = true; _queueOne.IsEnabled = !_imports.Busy && job.Created && !job.FillingStopped && missing.Length > 0;
         _details.Text = SpotifyPlaylists.DisplayName(manifest.Name) + $" · {job.Found}/{job.Total} present · {missing.Length} missing";
         _index = Math.Clamp(_index, 0, Math.Max(0, (missing.Length - 1) / 100));
         var history = _downloads.History;

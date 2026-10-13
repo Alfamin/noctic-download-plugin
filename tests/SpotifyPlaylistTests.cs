@@ -53,7 +53,30 @@ internal static class SpotifyPlaylistTests
     }
     public static async Task RunAsync()
     {
-        Links(); Matching(); await Imports(); await Failures(); await HeldQueue(); await UnavailableAndMoved();
+        Links(); Matching(); await Imports(); await OnePlaylist(); await Failures(); await HeldQueue(); await UnavailableAndMoved();
+    }
+    private static async Task OnePlaylist()
+    {
+        Check.Section("queueing the missing songs of one playlist only");
+        var folder = Check.NewFolder("playlist-one"); var library = new Library();
+        library.Add(folder, "Song 0"); library.Add(folder, "Song 2");
+        var source = new TransferTests.Source("DeezLoad"); var sources = new MusicSources(source, new TransferTests.Source("Music Hunters"), _ => { });
+        using var downloads = new Downloads(_ => { }, Path.Combine(folder, "queue.json"), sources.Track);
+        using var imports = new SpotifyPlaylists(Path.Combine(folder, "imports.json"), library, downloads, sources.Track, new PlaylistCatalog(new Http()));
+        await imports.ImportAsync(Url(1) + "\n" + Url(2), default);
+        var first = imports.Jobs[0]; var second = imports.Jobs[1]; // missing: "Song 1" (listed twice) · "Song 1" and "Song 3"
+        Check.Equal(1, await imports.QueueMissingAsync(folder, only: first), "only the picked playlist's missing songs are queued; a song it lists twice, once");
+        Check.Equal("Song 1", string.Join(", ", downloads.Active.Select(d => d.Track.Title)), "the other playlist's own missing song is left alone");
+        Check.True(imports.Status.Contains("from \"Feeling Shit\""), "the status names the playlist");
+        Check.True(downloads.Active.All(d => d.Held), "they wait for Start like any others");
+        Check.Equal(0, await imports.QueueMissingAsync(folder, only: first), "asked again, nothing is queued twice");
+        Check.True(imports.Status.StartsWith("Nothing new to queue for \"Feeling Shit\""), "and the status says so");
+        Check.Equal(1, await imports.QueueMissingAsync(folder, only: second), "the second playlist adds only the song that is not queued yet");
+        Check.Equal(0, await imports.QueueMissingAsync(folder), "after both, all playlists together have nothing left to queue");
+        library.Lists[first.LibraryId].Reverse(); // the user reorders it in Noctis
+        Check.Equal(0, await imports.QueueMissingAsync(folder, only: first), "a playlist edited in Noctis is not queued for");
+        Check.True(imports.Status.StartsWith("PLAYLIST_EDITED"), "and the status says why");
+        Check.Equal(0, source.Calls, "queueing never asks a bot for audio");
     }
     private static void Links()
     {

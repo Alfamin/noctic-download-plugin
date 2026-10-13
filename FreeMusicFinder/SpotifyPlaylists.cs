@@ -217,7 +217,8 @@ internal sealed class SpotifyPlaylists : IDisposable
         var text = new string(name.Where(c => !char.IsControl(c)).Take(200).ToArray()).Trim();
         return text.Length > 0 ? text : "Spotify playlist"; // emoji names remain valid; never used as paths
     }
-    public async Task<int> QueueMissingAsync(string folder, CancellationToken ct = default)
+    /// <param name="only">The one import whose missing songs are wanted; null for those of every import.</param>
+    public async Task<int> QueueMissingAsync(string folder, CancellationToken ct = default, SpotifyPlaylist? only = null)
     {
         folder = Path.GetFullPath(folder);
         using var scope = CancellationTokenSource.CreateLinkedTokenSource(ct, _stop.Token);
@@ -226,11 +227,13 @@ internal sealed class SpotifyPlaylists : IDisposable
         try
         {
             await CheckCore(scope.Token).ConfigureAwait(false);
+            // Removed from the list meanwhile, never created, or edited in Noctis: its status says which.
+            if (only is not null && (!Jobs.Contains(only) || !only.Created || only.FillingStopped)) { Publish(only.Status); return 0; }
             var queued = 0;
             var known = _downloads.History.Where(d => d.Track.Request is not null &&
                 (d.IsActive || d.State == DownloadState.Failed || (d.State is DownloadState.Saved or DownloadState.AlreadyThere &&
                 Downloader.FindExisting(d.Folder, d.Track.FileName) is not null))).Select(d => d.Track.Request!).ToList();
-            foreach (var job in Jobs.Where(j => j.Created && !j.FillingStopped))
+            foreach (var job in Jobs.Where(j => j.Created && !j.FillingStopped && (only is null || ReferenceEquals(j, only))))
                 foreach (var entry in job.Manifest!.Entries.Where(e => !job.Matches.ContainsKey(e.Position)))
                 {
                     scope.Token.ThrowIfCancellationRequested();
@@ -239,7 +242,10 @@ internal sealed class SpotifyPlaylists : IDisposable
                     _downloads.Start(_track(request with { PreferredSource = "DeezLoad" }), folder, held: true);
                     known.Add(request); queued++;
                 }
-            Publish($"{queued} missing recordings added to the queue, without duplicates. Press Start queued downloads when ready; unavailable metadata entries stay listed.");
+            var name = only?.Manifest is {} named ? DisplayName(named.Name) : "";
+            Publish(only is null ? $"{queued} missing recordings added to the queue, without duplicates. Press Start queued downloads when ready; unavailable metadata entries stay listed."
+                : queued > 0 ? $"{queued} missing recordings from \"{name}\" added to the queue. Press Start queued downloads when ready; unavailable metadata entries stay listed."
+                : $"Nothing new to queue for \"{name}\": its missing songs are already in the queue or saved, or Spotify gave no usable metadata for them.");
             return queued;
         }
         finally { Busy = false; _operation.Release(); Publish(); }

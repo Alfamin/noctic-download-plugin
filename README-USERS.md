@@ -11,7 +11,8 @@ You need: Noctis 1.5.3 or newer, a Telegram account, and the file
 
 **New in 2.6:** the **Playlists** tab brings your Spotify playlists into Noctis using the music
 you already have. Paste several playlist links, one per line → **Create playlists** → review
-**Missing songs** → **Queue missing songs** → **Start queued downloads**. Shared songs use
+**Missing songs** → **Queue all missing songs** → **Start queued downloads**. For one playlist
+alone, press its **Missing songs** and then **Queue these songs**. Shared songs use
 one local file, in every playlist's original order. You can create playlists before logging
 in to Telegram. Downloads need Telegram and your normal download folder to be in Noctis's
 library (or add it/rescan). **Check library again** fills local gaps; Spotify refetch is deferred.
