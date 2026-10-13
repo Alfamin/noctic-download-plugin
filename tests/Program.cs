@@ -5,6 +5,13 @@ using FreeMusicFinder.Tests;
 
 // Runs every test and prints one line each. The exit code is the number of wrong ones.
 // With FMF_PICTURES set to a folder, the window tests also save pictures of the search window there.
+// With FMF_LIVE_ROUTE set to public Spotify or Deezer links, only LiveRouteTest runs: it reads their
+// metadata from the real services and says which way (proxy or direct) this computer reached them.
+if (Environment.GetEnvironmentVariable("FMF_LIVE_ROUTE") is { Length: > 0 } links)
+{
+    await LiveRouteTest.RunAsync(links, Environment.GetEnvironmentVariable("FMF_LIVE_PROXY"));
+    return 0;
+}
 try
 {
     await LogicTests.RunAsync();

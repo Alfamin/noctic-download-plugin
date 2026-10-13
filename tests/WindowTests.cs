@@ -238,7 +238,7 @@ internal static class WindowTests
         File.SetLastWriteTimeUtc(dead, DateTime.UtcNow.AddHours(-1));
 
         var plugin = new FreeMusicPlugin();
-        Check.Equal("2.6.0", plugin.Info.Version, "the version is the one in plugin.json");
+        Check.Equal("2.6.1", plugin.Info.Version, "the version is the one in plugin.json");
         plugin.Initialize(host);
         Check.Equal("Find more by this artist…", string.Join(",", host.Commands.Select(c => c.Label)), "one track menu entry");
         Check.Until(() => !File.Exists(dead), "what an interrupted download left behind is removed at the start");
@@ -305,12 +305,24 @@ internal static class WindowTests
 
         host.Values["proxy"] = "nonsense";
         host.Raise("proxy");
+        Check.Until(() => host.Notices.Any(n => n.Contains("The proxy setting is not understood")), "a proxy setting that is not understood is said with a notice");
         plugin.Shutdown();
         Check.True(window is { IsVisible: false } && Window() is null, "switching the plugin off closes the window");
         Check.Equal(1, host.CommandsRemoved, "and takes the menu entry away");
         Check.False(Press(noctis, Key.F, KeyModifiers.Control | KeyModifiers.Shift), "and the shortcut");
         Check.True(Window() is null, "which opens nothing any more");
         noctis.Close();
+
+        // The next time Noctis starts, the setting is still what it was left as.
+        var again = new FakeHost(Check.NewFolder("plugin/again"), music);
+        again.Values["shortcut"] = Shortcut.Default;
+        again.Values["proxy"] = "nonsense";
+        var restarted = new FreeMusicPlugin();
+        string? stopped = null;
+        try { restarted.Initialize(again); }
+        catch (Exception ex) { stopped = ex.Message; }
+        Check.Equal(null, stopped, "and does not stop the plugin as Noctis starts");
+        restarted.Shutdown();
         Check.Equal(0, host.Logs.Count(l => l.Contains("could not")), "nothing went wrong on the way");
     }
 

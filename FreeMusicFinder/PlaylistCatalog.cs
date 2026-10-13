@@ -25,29 +25,15 @@ internal sealed class PlaylistManifest
 internal sealed class PlaylistCatalog : IDisposable
 {
     private readonly HttpClient _http;
+    private readonly MetadataRoute? _route;
     public PlaylistCatalog(HttpMessageHandler? handler=null)
     {
+        _route=handler as MetadataRoute;
         _http=new HttpClient(handler??new HttpClientHandler {AllowAutoRedirect=false}){Timeout=TimeSpan.FromSeconds(25)};
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("Noctis-FreeMusicFinder/2.5");
     }
-    internal static HttpMessageHandler MetadataHandler(string setting)
-    {
-        var handler=new HttpClientHandler{AllowAutoRedirect=false};var choice=ProxyChoice.Parse(setting);
-        if(choice is null)handler.UseProxy=false;
-        else if(choice.Kind is ProxyKind.Http or ProxyKind.HttpOrSocks5 or ProxyKind.Socks5)
-        {
-            handler.Dispose();
-            return new SocketsHttpHandler{AllowAutoRedirect=false,UseProxy=false,ConnectTimeout=TimeSpan.FromSeconds(15),
-                ConnectCallback=async(context,ct)=>
-                {
-                    var connect=choice.ConnectAsync(context.DnsEndPoint.Host,context.DnsEndPoint.Port);
-                    try {var tcp=await connect.WaitAsync(ct).ConfigureAwait(false);return tcp.GetStream();}
-                    catch(OperationCanceledException){_=connect.ContinueWith(t=>{if(t.Status==TaskStatus.RanToCompletion)t.Result.Dispose();},TaskScheduler.Default);throw;}
-                }};
-        }
-        // MTProto only transports Telegram; HTTPS metadata continues through the computer's normal network.
-        return handler;
-    }
+    /// <summary>Spotify and Deezer are reached the way the "Proxy" setting says, as Telegram is (<see cref="MetadataRoute"/>).</summary>
+    internal static HttpMessageHandler MetadataHandler(string setting,Action<string>? log=null)=>new MetadataRoute(setting,log);
     public async Task<PlaylistManifest> ReadAsync(MusicLink link,PlaylistManifest? saved,Action<PlaylistManifest> checkpoint,Action<string> progress,CancellationToken ct)
     {
         var manifest=saved is {CompleteIds:true} && saved.Url==link.Url ? saved : new PlaylistManifest{Url=link.Url};
@@ -200,7 +186,7 @@ internal sealed class PlaylistCatalog : IDisposable
         {if(uri.Host!="spclient.wg.spotify.com")throw new InvalidDataException("Unapproved token destination.");request.Headers.Authorization=new AuthenticationHeaderValue("Bearer",token);request.Headers.Accept.ParseAdd("application/json");}
         HttpResponseMessage response;
         try { response=await _http.SendAsync(request,HttpCompletionOption.ResponseHeadersRead,ct).ConfigureAwait(false); }
-        catch(OperationCanceledException) when(!ct.IsCancellationRequested) {throw new TimeoutException("METADATA_TIMEOUT: the metadata service did not respond in 25 seconds.");}
+        catch(OperationCanceledException) when(!ct.IsCancellationRequested) {throw new TimeoutException("METADATA_TIMEOUT: "+(_route?.Unanswered(uri)??"the metadata service did not respond in 25 seconds."));}
         using var responseScope=response;
         if(response.StatusCode==(HttpStatusCode)429)
         {var until=response.Headers.RetryAfter?.Date??DateTimeOffset.UtcNow.Add(response.Headers.RetryAfter?.Delta??TimeSpan.FromMinutes(10));throw new SourcesWaitingException("Spotify metadata requests are limited; progress saved until its retry time.",until);}

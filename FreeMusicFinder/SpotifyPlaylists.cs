@@ -261,9 +261,9 @@ internal sealed class SpotifyPlaylists : IDisposable
         }
         finally { _operation.Release(); }
     }
-    public async Task UpdateProxyAsync(string setting)
+    public async Task UpdateProxyAsync(string setting, Action<string>? log = null)
     {
-        var replacement = new PlaylistCatalog(PlaylistCatalog.MetadataHandler(setting));
+        var replacement = new PlaylistCatalog(PlaylistCatalog.MetadataHandler(setting, log));
         await _operation.WaitAsync(_stop.Token).ConfigureAwait(false);
         try { _catalog.Dispose(); _catalog = replacement; }
         finally { _operation.Release(); }

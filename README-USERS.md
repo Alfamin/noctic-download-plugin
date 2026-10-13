@@ -34,6 +34,12 @@ does what the computer does. When a proxy is switched on in the computer's own s
 "system proxy" mode of a VPN app does that), Telegram is reached through it; a VPN that covers
 the whole computer works as well. Switching the VPN on or off later needs nothing either.
 
+Spotify and Deezer playlists are read the same way, through the same VPN or proxy. If a playlist
+cannot be read, its status says which way was tried (for example "through the computer's proxy
+127.0.0.1:10808", or "directly"): check that the VPN is connected and press **Create playlists**
+again. A Telegram proxy link carries Telegram only; with one of those, playlists still follow the
+computer's own proxy or VPN.
+
 Only if neither is what you use, put a proxy into the **Proxy** setting (Settings → Plugins →
 Free Music Finder) before you log in:
 

@@ -134,8 +134,17 @@ The setting can also name a proxy:
 - a Telegram (MTProto) proxy link: `https://t.me/proxy?server=…&port=…&secret=…` (or `tg://proxy?…`),
 - `direct`: never a proxy, whatever the computer is set to.
 
-A changed setting is used from the next search or login on. Noctis keeps plugin settings as
-plain text.
+Spotify and Deezer playlists are read the same way (`MetadataRoute` in `Proxy.cs`): through the
+proxy the setting names, or with the setting empty through the computer's own, asked at every
+connection. The name of the service is handed to the proxy and looked up at its end. A Telegram
+(MTProto) proxy carries Telegram only, so with one set playlists are read the computer's way. A
+read that fails says which way was tried, for example `METADATA_UNREACHABLE: Spotify could not
+be reached through the computer's proxy 127.0.0.1:10808`, and the Noctis log notes the way each
+time it changes.
+
+A changed setting is used from the next search, login or playlist import on. One that is not
+understood is said when it is changed and again by the search or import that needs it. Noctis
+keeps plugin settings as plain text.
 
 ## Telegram login
 
@@ -194,10 +203,15 @@ dotnet run --project tests
 
 They need neither Telegram nor a screen: the result list, file names, the "is this the file that
 was asked for" rule, the proxy setting and the computer's own (with a SOCKS5 and an HTTP proxy
-on the same computer), saving and
+on the same computer), the way playlists are read through them, saving and
 tidying up, the download queue, and the search window on Avalonia's headless platform with a
 stand-in for the bot. With `FMF_PICTURES` set to a folder they also save pictures of the window.
 Not covered by them: everything that needs the real bot and a real Telegram login.
+
+To see how this computer reaches Spotify and Deezer right now, set `FMF_LIVE_ROUTE` to one or
+more public links (and `FMF_LIVE_PROXY` to a Proxy setting to try; empty is the computer's own).
+Then only that runs: it reads the links' metadata from the real services, no audio, and prints
+the way each went (through which proxy, or directly) and how many entries came back.
 
 ## Layout
 
@@ -209,7 +223,7 @@ Not covered by them: everything that needs the real bot and a real Telegram logi
 - `FreeMusicFinder/Downloader.cs` — file names, the download folder, saving a file, tidying up
 - `FreeMusicFinder/BotText.cs` — reads the bot's result list; tells whether two descriptions mean the same song
 - `FreeMusicFinder/Telegram.cs` — the Telegram account (login steps, connection) and the bot: search and file download
-- `FreeMusicFinder/Proxy.cs` — the proxy setting, the computer's own proxy, and the SOCKS5 and HTTP connections
+- `FreeMusicFinder/Proxy.cs` — the proxy setting, the computer's own proxy, the SOCKS5 and HTTP connections, and the way playlists are read through them
 - `FreeMusicFinder/TelegramStore.cs` — the protected file the Telegram session is kept in
 - `FreeMusicFinder/TelegramLoginWindow.cs` — the login window
 - `FreeMusicFinder/plugin.json` — manifest and declared settings

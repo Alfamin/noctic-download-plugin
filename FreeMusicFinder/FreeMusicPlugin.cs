@@ -51,9 +51,9 @@ public sealed class FreeMusicPlugin : INoctisPlugin
             Path.Combine(host.DataDirectory,"source-limits.json"));
         _downloads = new Downloads(Log,Path.Combine(host.DataDirectory,"download-queue.json"),_bot.Track);
         _transfers = new PlaylistTransfers(_telegram,_bot,_downloads,Path.Combine(host.DataDirectory,"playlist-queue.json"),Owns,
-            new PlaylistCatalog(PlaylistCatalog.MetadataHandler(_proxy)));
+            new PlaylistCatalog(PlaylistCatalog.MetadataHandler(_proxy,Log)));
         _playlists = new SpotifyPlaylists(Path.Combine(host.DataDirectory, "spotify-playlists.json"), new PlaylistLibrary(), _downloads, _bot.Track,
-            new PlaylistCatalog(PlaylistCatalog.MetadataHandler(_proxy)));
+            new PlaylistCatalog(PlaylistCatalog.MetadataHandler(_proxy, Log)));
         _transfers.Changed += Announce;
         _downloads.Finished += Announce;
 
@@ -108,7 +108,10 @@ public sealed class FreeMusicPlugin : INoctisPlugin
         else if (key == ProxyKey)
         {
             _proxy = _host?.Settings.GetString(ProxyKey) ?? "";
-            try{_transfers?.UpdateProxy(_proxy);}catch(Exception ex){Announce("Metadata proxy: "+ex.Message);}
+            // Said now; a search or a playlist import with this setting says it again.
+            try { ProxyChoice.Parse(_proxy); }
+            catch (FormatException ex) { Announce("Free Music Finder: " + ex.Message); }
+            try{_transfers?.UpdateProxy(_proxy,Log);}catch(Exception ex){Announce("Metadata proxy: "+ex.Message);}
             UpdatePlaylistProxy();
         }
         else if (key == ShortcutKey) ApplyShortcut();
@@ -177,7 +180,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     }
     private async void UpdatePlaylistProxy()
     {
-        try { if (_playlists is {} playlists) await playlists.UpdateProxyAsync(_proxy); }
+        try { if (_playlists is {} playlists) await playlists.UpdateProxyAsync(_proxy, Log); }
         catch (OperationCanceledException) { }
         catch (Exception ex) { Announce("Playlist metadata proxy: " + ex.Message); }
     }

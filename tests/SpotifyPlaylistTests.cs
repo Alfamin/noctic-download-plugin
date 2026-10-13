@@ -168,6 +168,24 @@ internal static class SpotifyPlaylistTests
         Check.True(quota.Jobs[0].Status.Contains("retry"), "metadata quota is reported without contacting either bot");
         await quota.ImportAsync(Url(1) + "\n" + Url(2), default);
         Check.True(quota.Jobs.All(j => j.MetadataRetryAt > DateTimeOffset.UtcNow || j.Status.StartsWith("METADATA_LIMIT")), "metadata quota wait survives repeat/batch import without new requests");
+        // The computer's proxy is on but cannot get out, as a VPN app that is not connected: it turns every request down.
+        using var proxy = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0); proxy.Start();
+        var port = ((IPEndPoint)proxy.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                using var client = await proxy.AcceptTcpClientAsync(); var stream = client.GetStream(); var one = new byte[1]; var head = "";
+                while (!head.EndsWith("\r\n\r\n", StringComparison.Ordinal) && await stream.ReadAsync(one) > 0) head += (char)one[0];
+                await stream.WriteAsync("HTTP/1.1 503 Service Unavailable\r\n\r\n"u8.ToArray());
+            }
+        });
+        using var unreachable = new SpotifyPlaylists(Path.Combine(folder, "unreachable.json"), library, downloads, sources.Track,
+            new PlaylistCatalog(new MetadataRoute("", null, (_, _) => new ProxyChoice(ProxyKind.Http, "127.0.0.1", port))));
+        await unreachable.ImportAsync(Url(1), default);
+        Check.Equal($"METADATA_UNREACHABLE: Spotify could not be reached through the computer's proxy 127.0.0.1:{port}. The proxy could not connect to Spotify (answer 503). Check that the VPN or proxy is connected, then retry.",
+            unreachable.Jobs[0].Status, "Spotify is read through the computer's proxy, and a proxy that cannot get out is named in the import's status");
+        Check.False(unreachable.Jobs[0].Created, "no playlist is made from a list that could not be read");
         var bad = Path.Combine(folder, "bad.json"); File.WriteAllText(bad, "{bad");
         Check.Throws<InvalidDataException>(() => new SpotifyPlaylists(bad, library, downloads, sources.Track), "corrupt state kept and rejected");
         Check.Equal("{bad", File.ReadAllText(bad), "saved corrupt file not replaced");

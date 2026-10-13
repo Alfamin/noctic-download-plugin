@@ -72,9 +72,9 @@ internal sealed class PlaylistTransfers : IDisposable
         old.Cancel();old.Dispose();
         try {Changed?.Invoke("Playlist imports cleared. Downloaded files are kept.");}catch(Exception){}
     }
-    public void UpdateProxy(string setting)
+    public void UpdateProxy(string setting,Action<string>? log=null)
     {
-        var replacement=new PlaylistCatalog(PlaylistCatalog.MetadataHandler(setting));
+        var replacement=new PlaylistCatalog(PlaylistCatalog.MetadataHandler(setting,log));
         lock(_gate){_retiredCatalogs.Add(_catalog);_catalog=replacement;_networkVersion++;foreach(var job in _jobs.Where(j=>!j.Complete))job.RetryAt=DateTimeOffset.MinValue;Save();}
     }
     private void Save() {lock(_gate) AtomicJson.Write(_file,_jobs);}

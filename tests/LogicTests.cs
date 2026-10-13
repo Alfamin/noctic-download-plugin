@@ -19,6 +19,7 @@ internal static class LogicTests
         ComputerProxy();
         ShortcutSetting();
         await ProxiesAsync();
+        await MetadataRouteAsync();
         await SavingAsync();
         Leftovers();
         await QueueAsync();
@@ -276,6 +277,161 @@ internal static class LogicTests
         var free = ((IPEndPoint)nobody.LocalEndpoint).Port;
         nobody.Stop();
         await Check.ThrowsAsync<SocketException>(() => PingAsync(ProxyChoice.Parse($"127.0.0.1:{free}")!, "127.0.0.1"), "a proxy that is not there is reported");
+    }
+
+    /// <summary>
+    /// The playlist reader's way to the web: the plugin's setting first, otherwise the computer's
+    /// proxy, asked at every connection. A web server, an HTTP proxy and a SOCKS5 proxy, all on
+    /// this computer; "playlist.test" is a name only the proxies know the way to.
+    /// </summary>
+    private static async Task MetadataRouteAsync()
+    {
+        Check.Section("the way Spotify and Deezer are reached");
+        // It closes after each answer, so every request opens a connection of its own.
+        using var web = new TcpListener(IPAddress.Loopback, 0);
+        web.Start();
+        var webPort = ((IPEndPoint)web.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                var client = await web.AcceptTcpClientAsync();
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        using var _ = client;
+                        var stream = client.GetStream();
+                        var head = new StringBuilder();
+                        var one = new byte[1];
+                        while (!head.ToString().EndsWith("\r\n\r\n", StringComparison.Ordinal))
+                        {
+                            if (await stream.ReadAsync(one) == 0) return;
+                            head.Append((char)one[0]);
+                        }
+                        await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"));
+                    }
+                    catch (IOException)
+                    {
+                    }
+                });
+            }
+        });
+
+        var tunnels = new List<string>();
+        using var httpProxy = new TcpListener(IPAddress.Loopback, 0);
+        httpProxy.Start();
+        var httpPort = ((IPEndPoint)httpProxy.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                var client = await httpProxy.AcceptTcpClientAsync();
+                _ = Task.Run(() => FakeHttpProxyAsync(client, tunnels));
+            }
+        });
+        var asked = new List<string>();
+        using var socksProxy = new TcpListener(IPAddress.Loopback, 0);
+        socksProxy.Start();
+        var socksPort = ((IPEndPoint)socksProxy.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                var client = await socksProxy.AcceptTcpClientAsync();
+                _ = Task.Run(() => FakeSocksAsync(client, asked));
+            }
+        });
+        using var nobody = new TcpListener(IPAddress.Loopback, 0);
+        nobody.Start();
+        var free = ((IPEndPoint)nobody.LocalEndpoint).Port;
+        nobody.Stop();
+
+        var viaHttp = new ProxyChoice(ProxyKind.Http, "127.0.0.1", httpPort);
+        var viaSocks = new ProxyChoice(ProxyKind.Socks5, "127.0.0.1", socksPort);
+        ProxyChoice? computer = null;
+        var said = new List<string>();
+        static async Task<string> Read(HttpClient http, string address)
+        {
+            try { return await http.GetStringAsync("http://" + address + "/"); }
+            catch (HttpRequestException ex) { return ex.Message; }
+        }
+        async Task<string> Once(string setting, string address)
+        {
+            using var http = new HttpClient(new MetadataRoute(setting, null, (_, _) => computer));
+            return await Read(http, address);
+        }
+        string Asked() => $"{tunnels.Count} {asked.Count}";
+
+        // One reader, kept while the computer's setting changes: as Noctis is while a VPN is switched on and off.
+        using (var kept = new HttpClient(new MetadataRoute("", text => said.Add(text), (_, _) => computer)))
+        {
+            computer = viaHttp;
+            Check.Equal("ok", await Read(kept, $"playlist.test:{webPort}"), "the setting is empty and the computer's proxy is on: read through it");
+            Check.Equal($"none playlist.test:{webPort}", string.Join(" | ", tunnels), "the proxy is given the name; it is not looked up here, where a blocked name gets a wrong answer");
+            computer = null;
+            Check.Equal("ok", await Read(kept, $"127.0.0.1:{webPort}"), "switched off while Noctis runs: the next connection goes directly");
+            Check.Equal("1 0", Asked(), "without a proxy");
+            computer = viaSocks;
+            Check.Equal("ok", await Read(kept, $"playlist.test:{webPort}"), "switched to a SOCKS proxy: read through that");
+            Check.Equal("none name playlist.test", string.Join(" | ", asked), "by its name as well");
+            Check.Equal($"reading playlist metadata through the computer's proxy 127.0.0.1:{httpPort} | reading playlist metadata directly (the computer has no proxy switched on) | reading playlist metadata through the computer's proxy 127.0.0.1:{socksPort}",
+                string.Join(" | ", said), "the log says which way, once each time it changes");
+        }
+
+        tunnels.Clear();
+        asked.Clear();
+        computer = viaSocks;
+        Check.Equal("ok", await Once($"http://127.0.0.1:{httpPort}", $"playlist.test:{webPort}"), "a proxy named in the plugin's setting is the one used");
+        Check.Equal("1 0", Asked(), "and not the computer's");
+        Check.Equal("ok", await Once("direct", $"127.0.0.1:{webPort}"), "\"direct\" goes without the computer's proxy");
+        Check.Equal("1 0", Asked(), "no proxy was asked");
+        Check.Equal("ok", await Once("https://t.me/proxy?server=1.2.3.4&port=443&secret=ee0123abcd", $"playlist.test:{webPort}"), "a Telegram proxy carries Telegram only: the reader goes the computer's way");
+        Check.Equal("1 1", Asked(), "through the computer's proxy");
+
+        computer = viaHttp;
+        Check.Equal($"METADATA_UNREACHABLE: refuse.me could not be reached through the computer's proxy 127.0.0.1:{httpPort}. The proxy could not connect to refuse.me (answer 502). Check that the VPN or proxy is connected, then retry.",
+            await Once("", $"refuse.me:{webPort}"), "a proxy that says no: which way was tried, what it said, what to do");
+        computer = new ProxyChoice(ProxyKind.Http, "127.0.0.1", free);
+        var gone = await Once("", $"playlist.test:{webPort}");
+        Check.True(gone.StartsWith($"METADATA_UNREACHABLE: playlist.test could not be reached through the computer's proxy 127.0.0.1:{free}. ", StringComparison.Ordinal)
+            && gone.EndsWith(". Check that the VPN or proxy is connected, then retry.", StringComparison.Ordinal), "a proxy that is not there (a VPN app that was closed): " + gone);
+        computer = null;
+        var blocked = await Once("", $"127.0.0.1:{free}");
+        Check.True(blocked.StartsWith("METADATA_UNREACHABLE: 127.0.0.1 could not be reached directly (the computer has no proxy switched on). ", StringComparison.Ordinal)
+            && blocked.EndsWith(". Where it is blocked, turn on a VPN or its system proxy, or set a proxy in the plugin's settings, then retry.", StringComparison.Ordinal), "no proxy and no answer: " + blocked);
+
+        HttpMessageHandler? made = null;
+        try { made = PlaylistCatalog.MetadataHandler("hello"); }
+        catch (FormatException) { }
+        Check.True(made is not null, "a setting that is not understood does not stop the plugin as it starts");
+        made?.Dispose();
+        Check.Equal("METADATA_PROXY_SETTING: The proxy setting is not understood. " + ProxyChoice.Help, await Once("hello", $"127.0.0.1:{webPort}"), "it fails the request, with its reason");
+
+        // A proxy that takes the connection and then says nothing, as a VPN app that has lost its server does.
+        using var silent = new TcpListener(IPAddress.Loopback, 0);
+        silent.Start();
+        var silentPort = ((IPEndPoint)silent.LocalEndpoint).Port;
+        var waiting = new List<TcpClient>();
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                var client = await silent.AcceptTcpClientAsync();
+                lock (waiting) waiting.Add(client);
+            }
+        });
+        var lost = new ProxyChoice(ProxyKind.Http, "127.0.0.1", silentPort);
+        using (var catalog = new PlaylistCatalog(new MetadataRoute("", null, (_, _) => lost, TimeSpan.FromSeconds(1))))
+        {
+            MusicLink.TryParse("https://open.spotify.com/playlist/" + new string('0', 22), out var link);
+            var answer = "a list was read";
+            try { await catalog.ReadAsync(link!, null, _ => { }, _ => { }, default); }
+            catch (TimeoutException ex) { answer = ex.Message; }
+            Check.Equal($"METADATA_TIMEOUT: Spotify did not answer in time through the computer's proxy 127.0.0.1:{silentPort}. Check that the VPN or proxy is connected, then retry.",
+                answer, "a proxy that has lost its server: the playlist reader says so, by name");
+        }
+        lock (waiting) foreach (var client in waiting) client.Dispose();
     }
 
     private static async Task FakeHttpProxyAsync(TcpClient client, List<string> asked)

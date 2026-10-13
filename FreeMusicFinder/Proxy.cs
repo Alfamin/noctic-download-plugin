@@ -96,25 +96,28 @@ internal sealed record ProxyChoice(ProxyKind Kind, string Host, int Port, string
     }
 
     /// <summary>A connection to <paramref name="host"/>:<paramref name="port"/> that runs through this SOCKS5 or HTTP proxy.</summary>
-    public async Task<TcpClient> ConnectAsync(string host, int port)
+    public Task<TcpClient> ConnectAsync(string host, int port) => ConnectAsync(host, port, "Telegram");
+
+    /// <param name="what">What is at the other end, for the words of a refusal: "Telegram", "Spotify".</param>
+    public async Task<TcpClient> ConnectAsync(string host, int port, string what)
     {
         switch (Kind)
         {
             case ProxyKind.Socks5:
-                return await Socks5.ConnectAsync(this, host, port).ConfigureAwait(false);
+                return await Socks5.ConnectAsync(this, host, port, what).ConfigureAwait(false);
             case ProxyKind.Http:
-                return await HttpTunnel.ConnectAsync(this, host, port).ConfigureAwait(false);
+                return await HttpTunnel.ConnectAsync(this, host, port, what: what).ConfigureAwait(false);
             case ProxyKind.HttpOrSocks5:
                 try
                 {
                     // HTTP goes first: a SOCKS5 proxy turns down an HTTP request at its first letter,
                     // while an HTTP proxy would wait for the rest of a SOCKS5 greeting.
-                    return await HttpTunnel.ConnectAsync(this, host, port, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                    return await HttpTunnel.ConnectAsync(this, host, port, TimeSpan.FromSeconds(10), what).ConfigureAwait(false);
                 }
                 // It did not answer the way an HTTP proxy does. (One that answered and said no is believed.)
                 catch (Exception ex) when (ex is TimeoutException || (ex is IOException && ex is not ProxyRefusedException))
                 {
-                    return await Socks5.ConnectAsync(this, host, port).ConfigureAwait(false);
+                    return await Socks5.ConnectAsync(this, host, port, what).ConfigureAwait(false);
                 }
             default:
                 throw new InvalidOperationException("Not a proxy a connection can be opened through.");
@@ -251,13 +254,142 @@ internal static class SystemProxy
     }
 }
 
+/// <summary>
+/// How the web services that list a playlist (Spotify, Deezer) are reached: the way the "Proxy"
+/// setting says, as Telegram is. With the setting empty that is the computer's own proxy, asked
+/// again at every connection, so a VPN app switched on or off while Noctis runs needs nothing
+/// here. A Telegram (MTProto) proxy carries Telegram only: with one set these go the computer's
+/// way as well. The setting is read when a connection is made, so one that is not understood
+/// fails that request with its reason and not the plugin as it starts.
+/// </summary>
+internal sealed class MetadataRoute : DelegatingHandler
+{
+    private readonly string _setting;
+    private readonly Action<string>? _log;
+    private readonly Func<string, int, ProxyChoice?> _computer;
+    private string? _last;
+
+    /// <param name="computer">The computer's proxy for a host and port; the tests put their own here.</param>
+    /// <param name="patience">How long a connection may take to open.</param>
+    public MetadataRoute(string setting, Action<string>? log = null, Func<string, int, ProxyChoice?>? computer = null, TimeSpan? patience = null)
+    {
+        _setting = setting;
+        _log = log;
+        _computer = computer ?? Computer;
+        InnerHandler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            UseProxy = false, // the connections are opened here
+            ConnectTimeout = patience ?? TimeSpan.FromSeconds(15),
+            ConnectCallback = ConnectAsync,
+        };
+    }
+
+    /// <summary>What to tell the user when <paramref name="to"/> did not answer in time.</summary>
+    public string Unanswered(Uri to)
+    {
+        try
+        {
+            var (way, advice) = Describe(to);
+            return $"{Service(to.Host)} did not answer in time {way}. {advice}";
+        }
+        catch (FormatException ex)
+        {
+            return ex.Message;
+        }
+    }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        try
+        {
+            return await base.SendAsync(request, ct).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex)
+        {
+            // The first thing that went wrong says the most: the proxy's own words, or the system's.
+            var first = ex.GetBaseException();
+            if (first is FormatException) throw new HttpRequestException("METADATA_PROXY_SETTING: " + first.Message, ex);
+            var to = request.RequestUri!;
+            var (way, advice) = Describe(to);
+            throw new HttpRequestException($"METADATA_UNREACHABLE: {Service(to.Host)} could not be reached {way}. {first.Message.Trim().TrimEnd('.')}. {advice}", ex);
+        }
+    }
+
+    private async ValueTask<Stream> ConnectAsync(SocketsHttpConnectionContext context, CancellationToken ct)
+    {
+        var host = context.DnsEndPoint.Host;
+        var port = context.DnsEndPoint.Port;
+        var (via, way) = Route(host, port);
+        if (Interlocked.Exchange(ref _last, way) != way) _log?.Invoke("reading playlist metadata " + way);
+        if (via is null)
+        {
+            var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+            try
+            {
+                await socket.ConnectAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
+                return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+        }
+
+        // The name goes to the proxy as it is: looked up at its end, not here, where a blocked name gets a wrong answer.
+        var connect = via.ConnectAsync(host, port, Service(host));
+        try
+        {
+            return (await connect.WaitAsync(ct).ConfigureAwait(false)).GetStream();
+        }
+        catch (OperationCanceledException)
+        {
+            // Given up on. The connection may still come: it is closed then.
+            _ = connect.ContinueWith(t => { if (t.IsCompletedSuccessfully) t.Result.Dispose(); else _ = t.Exception; }, TaskScheduler.Default);
+            throw;
+        }
+    }
+
+    /// <summary>The proxy a connection to <paramref name="host"/> goes through at this moment (null: none), and that in words.</summary>
+    private (ProxyChoice? Via, string Way) Route(string host, int port)
+    {
+        var set = ProxyChoice.Parse(_setting);
+        if (set is null) return (null, "directly (the plugin's Proxy setting says direct)");
+        if (set.Kind is not (ProxyKind.System or ProxyKind.Telegram)) return (set, $"through the proxy {set.Host}:{set.Port} from the plugin's settings");
+        var via = _computer(host, port);
+        if (via is not null) return (via, $"through the computer's proxy {via.Host}:{via.Port}");
+        return (null, set.Kind == ProxyKind.Telegram
+            ? "directly (the Telegram proxy in the plugin's settings carries Telegram only, and the computer has no proxy switched on)"
+            : "directly (the computer has no proxy switched on)");
+    }
+
+    private (string Way, string Advice) Describe(Uri to)
+    {
+        var (via, way) = Route(to.Host, to.Port);
+        return (way, via is not null
+            ? "Check that the VPN or proxy is connected, then retry."
+            : "Where it is blocked, turn on a VPN or its system proxy, or set a proxy in the plugin's settings, then retry.");
+    }
+
+    // Windows' own switch first, as for Telegram; then what only .NET knows there (a proxy found
+    // automatically, the HTTPS_PROXY variable), which these requests followed before.
+    private static ProxyChoice? Computer(string host, int port)
+        => SystemProxy.For(host, port) ?? (OperatingSystem.IsWindows() ? SystemProxy.From(HttpClient.DefaultProxy, host, port) : null);
+
+    private static string Service(string host)
+        => host.EndsWith("spotify.com", StringComparison.OrdinalIgnoreCase) ? "Spotify"
+            : host.EndsWith("deezer.com", StringComparison.OrdinalIgnoreCase) ? "Deezer"
+            : host;
+}
+
 /// <summary>Opens a connection through an HTTP proxy by asking it for a tunnel (CONNECT, RFC 9110 section 9.3.6).</summary>
 internal static class HttpTunnel
 {
     private static readonly TimeSpan Patience = TimeSpan.FromSeconds(20);
 
     /// <summary>A connection to <paramref name="host"/>:<paramref name="port"/> that runs through the proxy.</summary>
-    public static async Task<TcpClient> ConnectAsync(ProxyChoice proxy, string host, int port, TimeSpan? patience = null)
+    public static async Task<TcpClient> ConnectAsync(ProxyChoice proxy, string host, int port, TimeSpan? patience = null, string what = "Telegram")
     {
         if (host.Any(c => char.IsWhiteSpace(c) || char.IsControl(c))) throw new IOException("The server name cannot be sent to the proxy.");
         using var timeout = new CancellationTokenSource(patience ?? Patience);
@@ -290,7 +422,7 @@ internal static class HttpTunnel
             var words = Encoding.ASCII.GetString(answer.ToArray()).Split('\r')[0].Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (words.Length < 2 || !int.TryParse(words[1], out var status)) throw new IOException("The proxy is not an HTTP proxy.");
             if (status == 407) throw new ProxyRefusedException(proxy.User is null ? "The proxy wants a name and password." : "The proxy did not accept the name and password.");
-            if (status is < 200 or > 299) throw new ProxyRefusedException($"The proxy could not connect to Telegram (answer {status}).");
+            if (status is < 200 or > 299) throw new ProxyRefusedException($"The proxy could not connect to {what} (answer {status}).");
             return tcp;
         }
         catch (OperationCanceledException)
@@ -312,7 +444,7 @@ internal static class Socks5
     private static readonly TimeSpan Patience = TimeSpan.FromSeconds(20);
 
     /// <summary>A connection to <paramref name="host"/>:<paramref name="port"/> that runs through the proxy.</summary>
-    public static async Task<TcpClient> ConnectAsync(ProxyChoice proxy, string host, int port)
+    public static async Task<TcpClient> ConnectAsync(ProxyChoice proxy, string host, int port, string what = "Telegram")
     {
         using var timeout = new CancellationTokenSource(Patience);
         var ct = timeout.Token;
@@ -352,7 +484,7 @@ internal static class Socks5
 
             var reply = await ReadAsync(stream, 4, ct).ConfigureAwait(false);
             if (reply[0] != 5) throw new IOException("The proxy answered in a way that is not SOCKS5.");
-            if (reply[1] != 0) throw new ProxyRefusedException($"The proxy could not connect to Telegram (answer {reply[1]}).");
+            if (reply[1] != 0) throw new ProxyRefusedException($"The proxy could not connect to {what} (answer {reply[1]}).");
             // The address the proxy connected from follows; it is of no use here.
             var rest = reply[3] switch
             {
