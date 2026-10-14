@@ -72,6 +72,50 @@ internal sealed class TelegramAccount : IDisposable
         }
     }
 
+    private readonly Dictionary<string, User> _bots = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _started = new(StringComparer.OrdinalIgnoreCase);
+    private Client? _botsClient;
+
+    /// <summary>
+    /// A bot's account, looked up once per connection. Telegram limits how often a username may be
+    /// resolved, and a playlist asks for many songs in a row.
+    /// </summary>
+    public async Task<User> BotAsync(Client client, string username)
+    {
+        lock (_bots)
+            if (ReferenceEquals(_botsClient, client) && _bots.TryGetValue(username, out var known)) return known;
+        var user = (await client.Contacts_ResolveUsername(username).ConfigureAwait(false)).User;
+        lock (_bots)
+        {
+            if (!ReferenceEquals(_botsClient, client)) { _bots.Clear(); _started.Clear(); _botsClient = client; }
+            _bots[username] = user;
+        }
+        return user;
+    }
+
+    /// <summary>
+    /// Sends "/start" to a bot this account has no chat with yet, before the first real message: a bot that
+    /// was never started may ignore anything else. Looked at once per connection; an existing chat is left alone.
+    /// </summary>
+    public async Task StartBotAsync(Client client, InputPeer bot, string username, CancellationToken ct)
+    {
+        lock (_bots)
+            if (ReferenceEquals(_botsClient, client) && _started.Contains(username)) return;
+        var history = await client.Messages_GetHistory(bot, limit: 1).WaitAsync(ct).ConfigureAwait(false);
+        if (history.Messages.Length == 0)
+        {
+            await client.SendMessageAsync(bot, "/start").WaitAsync(ct).ConfigureAwait(false);
+            _log?.Invoke("started the chat with @" + username);
+            // Its welcome arrives first, so it is not taken for the answer to the request that follows.
+            await Task.Delay(TimeSpan.FromSeconds(3), ct).ConfigureAwait(false);
+        }
+        lock (_bots)
+        {
+            if (!ReferenceEquals(_botsClient, client)) { _bots.Clear(); _started.Clear(); _botsClient = client; }
+            _started.Add(username);
+        }
+    }
+
     /// <summary>
     /// Sends the phone number. Returns what Telegram wants next ("verification_code",
     /// "password", …) for <see cref="ContinueLoginAsync"/>, or null when the login is complete.
@@ -233,6 +277,10 @@ internal sealed class TelegramBotSource : IHunterBotSource
     private readonly TelegramAccount _account;
     private readonly Action<string> _log;
     private (Client Client, InputPeer Peer)? _bot;
+    // Searches may now run while a download waits for its file. Two searches at once would each take
+    // the other's answer, since the bot answers both in the same chat; a download's file is told apart
+    // from a search answer by being a file.
+    private readonly SemaphoreSlim _searching = new(1, 1);
 
     public TelegramBotSource(TelegramAccount account, Action<string> log)
     {
@@ -245,16 +293,23 @@ internal sealed class TelegramBotSource : IHunterBotSource
     /// nothing. Throws <see cref="TimeoutException"/> when the bot does not answer and
     /// <see cref="BotAnswerException"/> when its answer cannot be read.
     /// </summary>
-    public Task<IReadOnlyList<BotTrack>> SearchAsync(string query, CancellationToken ct)
-        => RunAsync<IReadOnlyList<BotTrack>>(async (client, bot) =>
+    public async Task<IReadOnlyList<BotTrack>> SearchAsync(string query, CancellationToken ct)
+    {
+        await _searching.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            var sent = await client.SendMessageAsync(bot, "/search " + query).ConfigureAwait(false);
-            // The answer always carries buttons; without results it has no numbered ones.
-            var results = await WaitForAsync(client, bot, sent.id, m => Buttons(m).Any(), SearchWait, ct).ConfigureAwait(false)
-                ?? throw new TimeoutException("The bot did not answer.");
+            return await RunAsync<IReadOnlyList<BotTrack>>(async (client, bot) =>
+            {
+                var sent = await client.SendMessageAsync(bot, "/search " + query).ConfigureAwait(false);
+                // The answer always carries buttons; without results it has no numbered ones.
+                var results = await WaitForAsync(client, bot, sent.id, m => m.media is not MessageMediaDocument && Buttons(m).Any(), SearchWait, ct).ConfigureAwait(false)
+                    ?? throw new TimeoutException("The bot did not answer.");
 
-            return ParseResults(results,FetchSelectedAsync);
-        }, ct);
+                return ParseResults(results,FetchSelectedAsync);
+            }, ct).ConfigureAwait(false);
+        }
+        finally { _searching.Release(); }
+    }
 
     internal static IReadOnlyList<BotTrack> ParseResults(Message results,
         Func<MusicRequest,Stream,IProgress<double>?,CancellationToken,Task<string>> fetch)
@@ -354,7 +409,8 @@ internal sealed class TelegramBotSource : IHunterBotSource
         {
             var client = await _account.ConnectAsync(ct).ConfigureAwait(false);
             if (_bot?.Client != client)
-                _bot = (client, (await client.Contacts_ResolveUsername(Bot).ConfigureAwait(false)).User);
+                _bot = (client, await _account.BotAsync(client, Bot).ConfigureAwait(false));
+            await _account.StartBotAsync(client, _bot.Value.Peer, Bot, ct).ConfigureAwait(false);
             return await work(client, _bot.Value.Peer).ConfigureAwait(false);
         }
         catch (RpcException ex) when (ex.Code == 401)

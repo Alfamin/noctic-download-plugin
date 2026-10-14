@@ -39,6 +39,53 @@ internal static class TransferTests
     public static async Task RunAsync()
     {
         LinksAndMatching();Limits();await Routing();await DurableHandoff();await Catalogs();await QueueFailures();
+        await Mp3WhenNoFlac();await SearchBesideDownload();
+    }
+    private static async Task Mp3WhenNoFlac()
+    {
+        Check.Section("an MP3 is saved only when no bot has the recording in FLAC, and only when allowed");
+        var request=new MusicRequest("Leak","Artist",180);
+        Source Mp3(string id)=>new(id){Fetch=async(_,output)=>{await output.WriteAsync(Encoding.ASCII.GetBytes("ID3 mp3 audio"));return "mp3";}};
+        Source Missing(string id)=>new(id){Fetch=(_,_)=>throw new TrackUnavailableException("not there")};
+        var notices=new List<string>();
+        using(var output=new MemoryStream())
+        {
+            var hunters=Mp3("Music Hunters");var deez=Missing("DeezLoad");
+            Check.Equal("mp3",await new MusicSources(hunters,deez,notices.Add,allowMp3:()=>true).FetchAsync(request,output,null,default),"no FLAC anywhere: the MP3 is saved");
+            Check.Equal("ID3 mp3 audio",Encoding.ASCII.GetString(output.ToArray()),"the MP3 itself is what is written, not the other bot's leftovers");
+            Check.Equal(1,deez.Calls,"the other bot was asked for FLAC first");
+            Check.True(notices.Any(n=>n.Contains("MP3")),"the user is told an MP3 was saved");
+        }
+        using(var output=new MemoryStream())
+        {
+            var flac=new Source("DeezLoad");
+            Check.Equal("flac",await new MusicSources(Mp3("Music Hunters"),flac,_=>{},allowMp3:()=>true).FetchAsync(request,output,null,default),"FLAC from the other bot wins over the MP3");
+            Check.True(Encoding.ASCII.GetString(output.ToArray()).StartsWith("fLaC"),"and only the FLAC is written");
+        }
+        using(var output=new MemoryStream())
+            await Check.ThrowsAsync<TrackUnavailableException>(()=>new MusicSources(Mp3("Music Hunters"),Missing("DeezLoad"),_=>{},allowMp3:()=>false).FetchAsync(request,output,null,default),"setting off: FLAC only, as before");
+        using(var output=new MemoryStream())
+        {
+            var now=DateTimeOffset.UtcNow;
+            await Check.ThrowsAsync<SourcesWaitingException>(()=>new MusicSources(Mp3("Music Hunters"),new Source("DeezLoad"){Fetch=(_,_)=>throw new SourceLimitException("DeezLoad","limit",now.AddHours(1))},_=>{},now:()=>now,allowMp3:()=>true)
+                .FetchAsync(request,output,null,default),"a bot that is waiting out a limit may still have FLAC: the song waits instead of taking the MP3");
+        }
+    }
+    private static async Task SearchBesideDownload()
+    {
+        Check.Section("a search does not wait for the download in progress");
+        var release=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var slow=new Source("DeezLoad"){Fetch=async(_,output)=>{entered.SetResult();await release.Task;await output.WriteAsync(Encoding.ASCII.GetBytes("fLaC"));return "flac";}};
+        var sources=new MusicSources(new Source("Music Hunters"),slow,_=>{});
+        using var output=new MemoryStream();
+        var download=sources.FetchAsync(new MusicRequest("Song","Artist",180,PreferredSource:"DeezLoad"),output,null,default);
+        await entered.Task;
+        var search=sources.SearchAsync("Artist Song",default);
+        Check.True(await Task.WhenAny(search,Task.Delay(2000))==search,"the search answers while the file is still coming");
+        Check.False(download.IsCompleted,"the download was not disturbed");
+        release.SetResult();
+        Check.Equal("flac",await download,"and the download still finishes");
     }
     private static void LinksAndMatching()
     {

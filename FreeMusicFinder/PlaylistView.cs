@@ -33,7 +33,8 @@ internal sealed class PlaylistView : Grid, IDisposable
     private int _index;
     private string _listStamp = "";
     private CancellationTokenSource? _importStop;
-    private bool _disposed, _posted;
+    private bool _disposed, _posted, _stale;
+    private long _progressShown;
     public PlaylistView(SpotifyPlaylists imports, Downloads downloads, Func<string> folder, Func<bool> loggedIn)
     {
         _imports = imports; _downloads = downloads; _folder = folder; _loggedIn = loggedIn;
@@ -80,6 +81,7 @@ internal sealed class PlaylistView : Grid, IDisposable
         _previous.Click += (_, _) => { _index--; RefreshMissing(); };
         _next.Click += (_, _) => { _index++; RefreshMissing(); };
         _imports.Changed += Schedule; _downloads.Changed += OnDownload;
+        AttachedToVisualTree += (_, _) => { if (_stale && !_disposed) { _stale = false; Refresh(); } };
         Refresh();
     }
     private async void Act(Func<Task> action)
@@ -89,12 +91,28 @@ internal sealed class PlaylistView : Grid, IDisposable
         catch (Exception ex) { if (!_disposed) _status.Text = SpotifyPlaylists.Explain(ex); }
         finally { if (!_disposed) Refresh(false); }
     }
-    private void OnDownload(Download _) => Schedule();
+    private void OnDownload(Download download)
+    {
+        // A transfer reports its progress many times a second; the missing list shows it once a second.
+        if (download.State == DownloadState.Running)
+        {
+            var now = Environment.TickCount64;
+            lock (this) { if (now - _progressShown < 1000) return; _progressShown = now; }
+        }
+        Schedule();
+    }
     private void Schedule()
     {
         // Metadata updates can arrive in parallel; show one UI refresh per dispatcher turn.
         lock (this) { if (_disposed || _posted) return; _posted = true; }
-        Dispatcher.UIThread.Post(() => { lock (this) _posted = false; if (!_disposed) Refresh(); });
+        Dispatcher.UIThread.Post(() =>
+        {
+            lock (this) _posted = false;
+            if (_disposed) return;
+            // Another tab is open: the list is drawn when this one is shown again, not on every change meanwhile.
+            if (TopLevel.GetTopLevel(this) is null) { _stale = true; return; }
+            Refresh();
+        });
     }
     private void Refresh(bool status = true)
     {

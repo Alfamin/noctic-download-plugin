@@ -239,7 +239,7 @@ internal sealed class SearchWindow : Window
             _defaultFolder = null; // looked up again per search: the library folders may have changed
             _search?.Cancel();
             var search = _search = CancellationTokenSource.CreateLinkedTokenSource(_closed.Token);
-            search.CancelAfter(_downloads.Active.Any(d=>d.State==DownloadState.Running)?TimeSpan.FromMinutes(20):TimeSpan.FromSeconds(30));
+            search.CancelAfter(TimeSpan.FromSeconds(30));
             var ct = search.Token;
 
             _tabs.SelectedIndex=0;
@@ -259,7 +259,7 @@ internal sealed class SearchWindow : Window
             if(Uri.TryCreate(query,UriKind.Absolute,out _)) { _status.Text="Use a full Spotify or Deezer track, album or playlist link. Other links are not opened.";return; }
 
             _searchButton.IsEnabled = false;
-            _status.Text = _downloads.Active.Any(d=>d.State==DownloadState.Running)?"Waiting for the current download, then searching…":"Searching…";
+            _status.Text = "Searching…";
             try
             {
                 // Task.Run keeps the waiting on the bot off the UI thread.
@@ -338,8 +338,11 @@ internal sealed class SearchWindow : Window
         if (_noLibrary) return false;
         try
         {
+            // Also the reading the Playlists tab uses: "Song (with X) - Remix" in one place is "Song (Remix)" in the other.
+            var wanted = new MusicRequest(track.Title, track.Artist, track.Duration?.TotalSeconds);
             return _host.Library.Search(BotText.Plain(track.Title), 50)
-                .Any(t => BotText.SameSong(track.Artist, track.Title, track.Duration, t.Artist, t.Title, t.Duration));
+                .Any(t => BotText.SameSong(track.Artist, track.Title, track.Duration, t.Artist, t.Title, t.Duration)
+                    || RecordingMatch.Fits(wanted, t.Artist, t.Title, t.Duration > TimeSpan.Zero ? t.Duration : null));
         }
         catch (Exception ex)
         {

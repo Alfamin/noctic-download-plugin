@@ -36,20 +36,20 @@ internal sealed class HunterMusicSource : IMusicSource
     {
         var account=_account!;
         var cachedClient=await account.ConnectAsync(ct).ConfigureAwait(false);
-        var cachedPeer=(await cachedClient.Contacts_ResolveUsername(TelegramBotSource.Bot)).User;
+        var cachedPeer=await account.BotAsync(cachedClient,TelegramBotSource.Bot).ConfigureAwait(false);
         if(await TelegramAudioCache.Find(cachedClient,cachedPeer,request,ct).ConfigureAwait(false) is {} existing)
         {
-            await cachedClient.DownloadFileAsync(existing,output,(PhotoSizeBase?)null,(done,total)=>{ct.ThrowIfCancellationRequested();if(total>0)progress?.Report((double)done/total);}).WaitAsync(ct).ConfigureAwait(false);
+            await cachedClient.DownloadFileAsync(existing,output,(PhotoSizeBase?)null,TransferProgress.Steps(progress,ct)).WaitAsync(ct).ConfigureAwait(false);
             return "flac";
         }
         if (request.MessageId is {} id && request.CachedFrom == Id)
         {
             var client=await account.ConnectAsync(ct).ConfigureAwait(false);
-            var bot=(await client.Contacts_ResolveUsername(TelegramBotSource.Bot)).User;
+            var bot=await account.BotAsync(client,TelegramBotSource.Bot).ConfigureAwait(false);
             var old=await client.Messages_GetHistory(bot,offset_id:id+1,limit:1).WaitAsync(ct).ConfigureAwait(false);
             if(old.Messages.OfType<Message>().FirstOrDefault(m=>m.id==id)?.media is MessageMediaDocument{document:Document doc} && DeezLoadSource.Fits(request,doc))
             {
-                await client.DownloadFileAsync(doc,output,(PhotoSizeBase?)null,(done,total)=>{ct.ThrowIfCancellationRequested();if(total>0)progress?.Report((double)done/total);}).WaitAsync(ct).ConfigureAwait(false);
+                await client.DownloadFileAsync(doc,output,(PhotoSizeBase?)null,TransferProgress.Steps(progress,ct)).WaitAsync(ct).ConfigureAwait(false);
                 return Path.GetExtension(doc.Filename??"").TrimStart('.').ToLowerInvariant();
             }
         }
@@ -118,6 +118,7 @@ internal static class RecordingMatch
 internal sealed class DeezLoadSource : IMusicSource
 {
     public const string Bot = "deezload2bot";
+    private static readonly TimeSpan OtherRecordingGrace = TimeSpan.FromMinutes(1);
     public string Id => "DeezLoad";
     private readonly TelegramAccount _account;
     private readonly Action<string> _notice;
@@ -126,7 +127,7 @@ internal sealed class DeezLoadSource : IMusicSource
     public async Task<IReadOnlyList<MusicRequest>> SearchAsync(string query,CancellationToken ct)
     {
         var client=await _account.ConnectAsync(ct).ConfigureAwait(false);
-        var bot=(await client.Contacts_ResolveUsername(Bot)).User;
+        var bot=await _account.BotAsync(client,Bot).ConfigureAwait(false);
         try
         {
             var results=await client.Messages_GetInlineBotResults(bot,bot,query,"").WaitAsync(ct).ConfigureAwait(false);
@@ -159,7 +160,7 @@ internal sealed class DeezLoadSource : IMusicSource
     public async Task<string> FetchAsync(MusicRequest request,Stream output,IProgress<double>? progress,CancellationToken ct)
     {
         var client=await _account.ConnectAsync(ct).ConfigureAwait(false);
-        var bot=(await client.Contacts_ResolveUsername(Bot)).User;
+        var bot=await _account.BotAsync(client,Bot).ConfigureAwait(false);
         if(await TelegramAudioCache.Find(client,bot,request,ct).ConfigureAwait(false) is {} existing)
             return await Download(client,existing,output,progress,ct).ConfigureAwait(false);
         if(request.MessageId is {} id && request.CachedFrom == Id)
@@ -182,8 +183,10 @@ internal sealed class DeezLoadSource : IMusicSource
                 url=MatchingInlineLink(request,matches.results.OfType<BotInlineResult>());
             }
             if(!MusicLink.TryParse(url,out var link) || link!.Kind!="track") throw new TrackUnavailableException("DeezLoad did not return a usable track link.");
+            await _account.StartBotAsync(client,bot,Bot,ct).ConfigureAwait(false);
             var sent=await client.SendMessageAsync(bot,link.Url).WaitAsync(ct).ConfigureAwait(false);
             var end=DateTimeOffset.UtcNow.AddMinutes(15); var cursor=sent.id; var lastNotice="";
+            string? other=null; DateTimeOffset? otherSince=null;
             while(DateTimeOffset.UtcNow<end)
             {
                 ct.ThrowIfCancellationRequested();
@@ -191,7 +194,11 @@ internal sealed class DeezLoadSource : IMusicSource
                 foreach(var m in replies)
                 {
                     if(BotLimits.Read(Id,m.message??"",DateTimeOffset.UtcNow) is {} limited) throw limited;
-                    if(m.media is MessageMediaDocument {document:Document doc} && Fits(request,doc)) return await Download(client,doc,output,progress,ct).ConfigureAwait(false);
+                    if(m.media is MessageMediaDocument {document:Document doc})
+                    {
+                        if(Fits(request,doc)) return await Download(client,doc,output,progress,ct).ConfigureAwait(false);
+                        if(Request(doc,null) is {} sentTrack){other??=Shorten(sentTrack.Artist+" - "+sentTrack.Title);otherSince??=DateTimeOffset.UtcNow;}
+                    }
                     if(m.message is {Length:>0} status && status!=lastNotice && (status.Contains("position in the queue") || status.Contains("Downloading")))
                     {
                         _notice("DeezLoad: "+(lastNotice=status).ReplaceLineEndings(" "));
@@ -199,6 +206,11 @@ internal sealed class DeezLoadSource : IMusicSource
                     }
                     if(Regex.IsMatch(m.message??"",@"cannot download|not available|not found",RegexOptions.IgnoreCase)) throw new TrackUnavailableException("DeezLoad could not supply this recording.");
                 }
+                // The bot sent another recording (often the same song in a version of another length). The right one
+                // still gets a minute, in case that file was a late answer to an earlier request; then the backup is
+                // tried, instead of every other song and search waiting out the whole quarter of an hour.
+                if(otherSince is {} since && DateTimeOffset.UtcNow-since>=OtherRecordingGrace)
+                    throw new TrackUnavailableException($"DeezLoad sent another recording ({other}) and not this one.");
                 await Task.Delay(TimeSpan.FromSeconds(4),ct).ConfigureAwait(false);
             }
             throw new TimeoutException("DeezLoad did not deliver the track within 15 minutes. The backup will be tried.");
@@ -212,6 +224,7 @@ internal sealed class DeezLoadSource : IMusicSource
         => results.Where(r=>r.send_message is BotInlineMessageText)
             .Select(r=>InlineTrack(r.title??"",r.description??"",((BotInlineMessageText)r.send_message).message))
             .FirstOrDefault(r=>r is not null && RecordingMatch.Fits(wanted,r.Artist,r.Title,r.Duration))?.Url;
+    private static string Shorten(string text)=>text.Length<=80?text:text[..80]+"…";
     internal static MusicRequest? Request(Document doc,int? messageId)
     {
         var audio=doc.attributes?.OfType<DocumentAttributeAudio>().FirstOrDefault();
@@ -227,7 +240,7 @@ internal sealed class DeezLoadSource : IMusicSource
     {
         var ext=Path.GetExtension(doc.Filename??"").TrimStart('.').ToLowerInvariant();
         if(ext!="flac" && doc.mime_type is not "audio/flac" and not "audio/x-flac") throw new TrackUnavailableException("The bot returned a file in a different quality; FLAC is required.");
-        await client.DownloadFileAsync(doc,output,(PhotoSizeBase?)null,(done,total)=>{ ct.ThrowIfCancellationRequested(); if(total>0) progress?.Report((double)done/total); }).WaitAsync(ct).ConfigureAwait(false);
+        await client.DownloadFileAsync(doc,output,(PhotoSizeBase?)null,TransferProgress.Steps(progress,ct)).WaitAsync(ct).ConfigureAwait(false);
         return "flac";
     }
     internal static async Task<IReadOnlyList<Message>> ReadNew(Client client,InputPeer bot,int after,CancellationToken ct)
@@ -245,6 +258,22 @@ internal sealed class DeezLoadSource : IMusicSource
             await Task.Delay(600,ct).ConfigureAwait(false);
         }
         return all.OrderBy(m=>m.id).ToArray();
+    }
+}
+
+/// <summary>Download progress in steps of 2 %: every report redraws the queue in the window.</summary>
+internal static class TransferProgress
+{
+    public static Client.ProgressCallback Steps(IProgress<double>? progress,CancellationToken ct)
+    {
+        var last=0.0;
+        return (done,total)=>
+        {
+            ct.ThrowIfCancellationRequested();
+            if(total<=0)return;
+            var share=(double)done/total;
+            if(share-last>=0.02 || done>=total)progress?.Report(last=share);
+        };
     }
 }
 

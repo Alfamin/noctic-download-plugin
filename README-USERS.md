@@ -116,8 +116,12 @@ remaining recordings are requested individually, so the backup receives only unf
 - Telegram-wide waits affect both bots. Source switching does not avoid that wait.
 - No daily allowance is hard-coded. Without a supplied reset time, the next check is in 24 hours.
 - **Retry failed** retries failed songs and incomplete metadata; completed files stay intact.
-- Matching FLAC recordings are required. Wrong artists, clear version differences, large
-  duration differences and named clean versions of explicit tracks are rejected.
+- Songs are asked for in FLAC from both bots first. When neither has a song in FLAC (often the case
+  for leaks and unreleased songs), the MP3 a bot sent is saved instead; switch off **Accept MP3 when
+  there is no FLAC** in the plugin's settings for FLAC only. Wrong artists, clear version differences,
+  large duration differences and named clean versions of explicit tracks are rejected.
+- Searching works while a song downloads; it no longer waits for the transfer to finish.
+- A bot you never opened in Telegram is started automatically ("/start") before the first request.
 - Public playlists need no Spotify login. Private/removed/region-blocked metadata is reported;
   make the link accessible and retry. Truncated previews are refused.
 - Local-file metadata is retained when unambiguous. Ambiguous entries and podcasts stay visible.

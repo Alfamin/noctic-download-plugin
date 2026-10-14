@@ -16,6 +16,40 @@ internal static class QueueManagementTests
     public static async Task RunAsync()
     {
         await Priority(); await RemovalAndRestart(); await CancelRunning(); await ClearAndStorageFailure(); await ClearImports();
+        await WorkerSurvivesSaveFailure(); await ReportWhileHeld();
+    }
+    private static async Task WorkerSurvivesSaveFailure()
+    {
+        Check.Section("a queue file held open by another program does not stop the download worker");
+        var root = Check.NewFolder("queue-save-failure"); var store = Path.Combine(root, "queue.json");
+        var logs = new List<string>();
+        using var queue = new Downloads(text => { lock (logs) logs.Add(text); }, store, r => Track(r.Title));
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = queue.Start(Track("While locked", async ct => { entered.SetResult(); await release.Task.WaitAsync(ct); }), root);
+        await entered.Task;
+        using (File.Open(store, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            release.SetResult();
+            await Check.UntilAsync(() => first.State == DownloadState.Saved, "the song finishes while its queue file cannot be written");
+            await Task.Delay(150); // the worker's save after the song fails meanwhile
+        }
+        var second = queue.Start(Track("After the lock"), root);
+        await Check.UntilAsync(() => second.State == DownloadState.Saved, "the worker goes on with the next song after a failed save");
+        lock (logs) Check.Equal(1, logs.Count(l => l.StartsWith("QUEUE_SAVE_FAILED")), "the failed save is logged once");
+        Check.True(File.ReadAllText(store).Contains("After the lock"), "the queue file is written again once it is free");
+    }
+    private static async Task ReportWhileHeld()
+    {
+        Check.Section("a finished download is reported while playlist songs wait for Start");
+        var root = Check.NewFolder("queue-report-held");
+        using var queue = new Downloads(_ => { });
+        var finished = new List<string>(); queue.Finished += text => { lock (finished) finished.Add(text); };
+        queue.Start(Track("Held one"), root, held: true); queue.Start(Track("Held two"), root, held: true);
+        queue.Start(Track("Wanted now"), root, priority: true);
+        await Check.UntilAsync(() => { lock (finished) return finished.Count == 1; }, "Download now is reported although staged songs still wait");
+        lock (finished) Check.True(finished[0].Contains("Wanted now"), "the notice names the song that was saved");
+        Check.Equal(2, queue.Active.Count(d => d.Held), "the staged songs still wait for Start");
     }
     private static async Task Priority()
     {

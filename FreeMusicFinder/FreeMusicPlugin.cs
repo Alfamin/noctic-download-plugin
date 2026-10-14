@@ -20,6 +20,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     private const string OpenSearchKey = "openSearch";
     private const string ProxyKey = "proxy";
     private const string ShortcutKey = "shortcut";
+    private const string AllowMp3Key = "allowMp3";
     internal const string DownloadFolderKey = "downloadFolder";
 
     private readonly List<IDisposable> _registrations = new();
@@ -33,6 +34,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     private KeyGesture? _shortcut;
     // Read on the threads that connect to Telegram; settings themselves are only read on the UI thread.
     private volatile string _proxy = "";
+    private volatile bool _allowMp3 = true;
 
     public PluginInfo Info { get; } = new(
         Id: "dev.moshi.freemusicfinder",
@@ -46,9 +48,10 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     {
         _host = host;
         _proxy = host.Settings.GetString(ProxyKey) ?? "";
+        _allowMp3 = host.Settings.GetBool(AllowMp3Key, true);
         _telegram = new TelegramAccount(Path.Combine(host.DataDirectory, "telegram.dat"), () => _proxy, Log);
         _bot = new MusicSources(new HunterMusicSource(_telegram,Log),new DeezLoadSource(_telegram,Announce),Announce,
-            Path.Combine(host.DataDirectory,"source-limits.json"));
+            Path.Combine(host.DataDirectory,"source-limits.json"),allowMp3:()=>_allowMp3);
         _downloads = new Downloads(Log,Path.Combine(host.DataDirectory,"download-queue.json"),_bot.Track);
         _transfers = new PlaylistTransfers(_telegram,_bot,_downloads,Path.Combine(host.DataDirectory,"playlist-queue.json"),Owns,
             new PlaylistCatalog(PlaylistCatalog.MetadataHandler(_proxy,Log)));
@@ -115,6 +118,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
             UpdatePlaylistProxy();
         }
         else if (key == ShortcutKey) ApplyShortcut();
+        else if (key == AllowMp3Key) _allowMp3 = _host?.Settings.GetBool(AllowMp3Key, true) ?? true;
     }
 
     private void ApplyShortcut()

@@ -12,6 +12,14 @@ if (Environment.GetEnvironmentVariable("FMF_LIVE_ROUTE") is { Length: > 0 } link
     await LiveRouteTest.RunAsync(links, Environment.GetEnvironmentVariable("FMF_LIVE_PROXY"));
     return 0;
 }
+// With FMF_LIVE_BOT set to a track link and FMF_TELEGRAM_STORE to the plugin's login file, only
+// LiveBotTest runs: it asks DeezLoad for that track with the real account (one message is sent) and
+// prints what the bot answers, without downloading the file. Noctis must be closed for it.
+if (Environment.GetEnvironmentVariable("FMF_LIVE_BOT") is { Length: > 0 } track)
+{
+    await LiveBotTest.RunAsync(track, Environment.GetEnvironmentVariable("FMF_TELEGRAM_STORE"), Environment.GetEnvironmentVariable("FMF_LIVE_PROXY"));
+    return 0;
+}
 // With FMF_REPLAY_IMPORTS set to a copy of the plugin's saved imports (spotify-playlists.json) and
 // FMF_LIBRARY_SNAPSHOT to a library list, only the replay runs: the saved playlists are matched
 // against that library again, offline, and what changed is printed. Both files are only read.

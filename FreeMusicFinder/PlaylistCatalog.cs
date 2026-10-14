@@ -192,9 +192,17 @@ internal sealed class PlaylistCatalog : IDisposable
         {var until=response.Headers.RetryAfter?.Date??DateTimeOffset.UtcNow.Add(response.Headers.RetryAfter?.Delta??TimeSpan.FromMinutes(10));throw new SourcesWaitingException("Spotify metadata requests are limited; progress saved until its retry time.",until);}
         if(!response.IsSuccessStatusCode) throw new InvalidDataException($"METADATA_HTTP_{(int)response.StatusCode}: cannot read the full list. Make the playlist accessible; if region-blocked, check your VPN/proxy and retry.");
         if(response.Content.Headers.ContentLength>4*1024*1024) throw new InvalidDataException("METADATA_TOO_LARGE: response exceeded 4 MB.");
-        await using var body=await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);using var buffer=new MemoryStream();var bytes=new byte[16384];
-        while(true){var count=await body.ReadAsync(bytes,ct).ConfigureAwait(false);if(count==0)break;if(buffer.Length+count>4*1024*1024)throw new InvalidDataException("METADATA_TOO_LARGE");buffer.Write(bytes,0,count);}
-        return System.Text.Encoding.UTF8.GetString(buffer.ToArray());
+        // The client's timeout ends when the headers arrive. Reading the rest gets 25 seconds of its own, so a reply
+        // that stalls after its headers (a VPN that drops the connection without closing it) cannot hang an import.
+        using var reading=CancellationTokenSource.CreateLinkedTokenSource(ct);reading.CancelAfter(_http.Timeout);
+        try
+        {
+            await using var body=await response.Content.ReadAsStreamAsync(reading.Token).ConfigureAwait(false);using var buffer=new MemoryStream();var bytes=new byte[16384];
+            while(true){var count=await body.ReadAsync(bytes,reading.Token).ConfigureAwait(false);if(count==0)break;if(buffer.Length+count>4*1024*1024)throw new InvalidDataException("METADATA_TOO_LARGE");buffer.Write(bytes,0,count);}
+            return System.Text.Encoding.UTF8.GetString(buffer.ToArray());
+        }
+        catch(OperationCanceledException) when(!ct.IsCancellationRequested)
+        {throw new TimeoutException("METADATA_TIMEOUT: "+(_route?.Unanswered(uri)??"the metadata service did not finish its answer in 25 seconds."));}
     }
     private async Task<PlaylistManifest> Deezer(MusicLink link,PlaylistManifest manifest,Action<PlaylistManifest> checkpoint,Action<string> progress,CancellationToken ct)
     {

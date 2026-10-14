@@ -26,7 +26,7 @@ internal sealed class Downloads : IDisposable
     private readonly HashSet<string> _tidied = new(StringComparer.OrdinalIgnoreCase);
     private readonly Action<string> _log;
     private readonly string? _store;
-    private bool _paused;
+    private bool _paused, _saveFailing;
     private Download? _current, _last;
     private CancellationTokenSource? _currentStop;
     private int _done, _saved;
@@ -79,6 +79,21 @@ internal sealed class Downloads : IDisposable
             _active.Concat(_known.Where(d => !active.Contains(d))).Where(d => d.Track.Request is not null)
                 .Select(d => new QueueItem(d.Track.Request!, d.Folder, d.State, d.Error, d.RetryAt, d.Priority, d.Held)).ToArray()));
     }
+    /// <summary>
+    /// The worker's own saves. One that fails (the file held open a moment by another program) must not stop the
+    /// worker: the queue in memory stays as it is and the next save writes it again.
+    /// </summary>
+    private void SaveOrLog()
+    {
+        try { Save(); _saveFailing = false; }
+        catch (Exception ex)
+        {
+            if (!_saveFailing) _log("QUEUE_SAVE_FAILED: " + ex.Message + " Downloads go on; the queue is saved again after the next change.");
+            _saveFailing = true;
+        }
+    }
+    // Whether a request would be started now: songs staged from Playlists wait for Start, and a pause holds the batch.
+    private bool Runnable(Download d) => !d.Held && (!_paused || d.Priority);
     private void Wake() { try { _wake.Release(); } catch (SemaphoreFullException) { } }
     public void SetPaused(bool paused)
     {
@@ -198,13 +213,13 @@ internal sealed class Downloads : IDisposable
                 TimeSpan delay = TimeSpan.FromMinutes(1);
                 lock (_gate)
                 {
-                    var eligible = _active.Where(d => d != _current && !d.Held && (!_paused || d.Priority)).ToArray();
+                    var eligible = _active.Where(d => d != _current && Runnable(d)).ToArray();
                     download = eligible.FirstOrDefault(d => d.RetryAt is null || d.RetryAt <= DateTimeOffset.UtcNow);
                     if (download is not null)
                     {
                         transfer = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
                         _current = download; _currentStop = transfer;
-                        download.State = DownloadState.Running; download.Error = ""; download.RetryAt = null; Save();
+                        download.State = DownloadState.Running; download.Error = ""; download.RetryAt = null; SaveOrLog();
                     }
                     else if (eligible.Length > 0)
                         delay = TimeSpan.FromMilliseconds(Math.Clamp((eligible.Min(d => d.RetryAt)!.Value - DateTimeOffset.UtcNow).TotalMilliseconds, 10, 60000));
@@ -222,9 +237,10 @@ internal sealed class Downloads : IDisposable
                             _active.Remove(download); _done++;
                             if (download.State == DownloadState.Saved) _saved++;
                             if (download.State != DownloadState.Cancelled) _last = download;
-                            if (_active.Count == 0) { summary = Summary(); _done = _saved = 0; _last = null; }
+                            // Songs waiting for Start or behind a pause do not keep the finished ones from being reported.
+                            if (!_active.Any(Runnable)) { summary = Summary(); _done = _saved = 0; _last = null; }
                         }
-                        Save();
+                        SaveOrLog();
                     }
                 }
                 Raise(download);

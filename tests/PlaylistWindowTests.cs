@@ -75,6 +75,12 @@ internal static class PlaylistWindowTests
         Check.Until(() => imports.Jobs.Count == 1, "remove import is available from screen");
         Check.Equal(2, library.Lists.Count, "removing an import keeps native playlists");
         Check.Equal(before, downloads.Active.Count, "removing an import keeps explicit queued requests");
+        // Another tab open (the view out of the window): changes do not redraw it, showing it again does.
+        window.Content = null; Dispatcher.UIThread.RunJobs();
+        imports.RemoveAsync(imports.Jobs.Single()).GetAwaiter().GetResult(); Dispatcher.UIThread.RunJobs();
+        Check.Equal(1, Field<StackPanel>(view, "_lists").Children.Count, "a hidden Playlists tab is not redrawn on every change");
+        window.Content = view;
+        Check.Until(() => Field<StackPanel>(view, "_lists").Children.Count == 0, "the Playlists tab is up to date when it is shown again");
         window.Close(); view.Dispose();
     }
     private static void Save(Window window, string folder, string name)
