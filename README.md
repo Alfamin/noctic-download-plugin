@@ -13,6 +13,12 @@ tile per edition; deluxe, live, remastered and anniversary editions remain separ
 international-version tags match that tile instead of adding a partial local duplicate.
 Album header covers load from the catalog cache and survive native library refreshes.
 
+Version **2.8.2** starts catalog loading as the native page opens, shows cached releases before
+background updates, and reuses parsed metadata and existing tiles. The release page no longer
+waits for an unused popular-song lookup. A subtle native loading indicator explains fresh
+network loads; navigating away cancels that artist's request. Memory caches are bounded,
+disk reads run off the UI thread, and provider pacing/proxy rules remain in effect.
+
 Version 2.6 adds a **Playlists** tab: paste several Spotify playlists, match songs across
 all local library folders, and create ordered Noctis playlists. Unique missing recordings wait
 in the shared queue until you start them; new downloads fill their original positions.

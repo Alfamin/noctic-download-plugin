@@ -25,13 +25,15 @@ internal static class LiveDiscoveryTest
             var exact = search.Value.Where(a => BotText.Key(a.Name) == BotText.Key(name) && (pieces.Length == 1 || a.Id == pieces[1])).ToArray();
             Check.Equal(1, exact.Length, "live metadata: one exact artist identity for " + name);
             if (exact.Length != 1) continue;
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
             var artist = await catalog.ArtistAsync(exact[0], false, stop.Token);
-            Check.True(artist.Value.Releases.Count > 0 && artist.Value.Popular.Count > 0, "live metadata: releases and popular songs for " + name);
+            Console.WriteLine($"  PERF  {(artist.Cached ? "cached" : "network")} artist metadata ready: {elapsed.Elapsed.TotalMilliseconds:F1} ms");
+            Check.True(artist.Value.Releases.Count > 0, "live metadata: artist releases for " + name);
             var title = Environment.GetEnvironmentVariable("FMF_DISCOVERY_ALBUM");
             var release = artist.Value.Releases.First(a => a.Count > 0 && (string.IsNullOrEmpty(title) || CatalogEditions.Same(a.Title, title)));
             var album = await catalog.AlbumAsync(release, false, stop.Token);
             Check.True(album.Value.Songs.Count > 0 && album.Value.Songs.All(s => !string.IsNullOrWhiteSpace(s.Request.Artist) && !string.IsNullOrWhiteSpace(s.Request.Title)), "live metadata: album songs produce usable recording requests");
-            Console.WriteLine($"  {artist.Value.Artist.Name}: {artist.Value.Artist.Id.Split(':')[0]}, {artist.Value.Releases.Count} releases, {artist.Value.Popular.Count} popular songs; {album.Value.Release.Title}: {album.Value.Songs.Count}/{album.Value.Release.Count} songs. {artist.Value.Notice} {album.Value.Notice}");
+            Console.WriteLine($"  {artist.Value.Artist.Name}: {artist.Value.Artist.Id.Split(':')[0]}, {artist.Value.Releases.Count} releases; {album.Value.Release.Title}: {album.Value.Songs.Count}/{album.Value.Release.Count} songs. {artist.Value.Notice} {album.Value.Notice}");
             var again = await catalog.AlbumAsync(release, false, stop.Token);
             Check.True(again.Cached, "live metadata: opening release again reuses saved catalog");
             if (!string.IsNullOrEmpty(title)) Check.Equal(1, artist.Value.Releases.Count(a => CatalogEditions.Same(a.Title, title)), "live metadata: one preferred album tile across clean/explicit variants");

@@ -62,6 +62,8 @@ internal static class NativeCatalogTests
         Check.Equal(1, originalTracks.Count, "global track list contains no catalog-only placeholders");
         Check.True(ReferenceEquals(((IList)Get(localAlbum, "Tracks")!)[0], track), "original album and track objects retain their data");
         Check.True(Values(artistType.GetMethod("GetAllTracks", Private)!.Invoke(artistVm, null)).All(t => Get(t, "FilePath") is string file && File.Exists(file)), "artist header playback, queue and file commands enumerate real local tracks only");
+        var reused = ApplyArtist(artistVm, profile, tiles);
+        Check.True(reused.Keys.All(t => tiles.ContainsKey(t)), "artist re-sorting/rebuilds reuse existing catalog tiles and loaded artwork");
         Set(artistVm, "SelectedTab", "singles");
         Check.Until(() => Values(Get(artistVm, "SingleReleases")).Count == 1, "native Singles tab navigation shows fetched release");
         var artistView = (UserControl)Activator.CreateInstance(app.GetType("Noctis.Views.ArtistDetailView", true)!)!; artistView.DataContext = artistVm;
@@ -140,8 +142,9 @@ internal static class NativeCatalogTests
         shell.CurrentView = artistVm;
         var lifecycleWindow = new Window { Content = artistView, Width = 1280, Height = 950 }; lifecycleWindow.Show();
         using var pages = new NativeCatalogPages(() => catalog, actions, logs.Add, () => enabled, () => shell, window: () => lifecycleWindow);
-        pages.Scan();
+        var pageReady = System.Diagnostics.Stopwatch.StartNew();
         Check.Until(() => artistView.GetVisualDescendants().OfType<TextBlock>().Any(t => t.Text?.Contains("online releases") == true), "page adapter fills the actual native artist view");
+        Console.WriteLine($"  PERF  cached native artist page ready: {pageReady.Elapsed.TotalMilliseconds:F1} ms");
         var catalogStatus = artistView.GetVisualDescendants().OfType<TextBlock>().First(t => t.Text?.Contains("online releases") == true);
         void Guard(UserControl view)
         {
@@ -198,12 +201,42 @@ internal static class NativeCatalogTests
         backAlbum.GetVisualDescendants().OfType<Button>().Single(b => Equals(b.Content, "Retry catalog")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Check.Until(() => backAlbum.GetVisualDescendants().OfType<NativeAlbumRows>().Any(), "Retry catalog recovers without leaving or recreating the native page");
         lifecycleWindow.Close(); pages.Dispose();
+        Check.Section("native loading: saved releases stay usable during a stalled refresh and navigation cancels it");
+        var staleFolder = Check.NewFolder("native-stale-catalog");
+        foreach (var file in Directory.GetFiles(Path.Combine(folder, "catalog"), "*.json")) File.Copy(file, Path.Combine(staleFolder, Path.GetFileName(file)));
+        var artistKey = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("artist:" + DiscoveryTests.Star.Id))).ToLowerInvariant() + ".json";
+        File.WriteAllText(Path.Combine(staleFolder, artistKey), System.Text.Json.JsonSerializer.Serialize(new { Version = 1, SavedAt = DateTimeOffset.UtcNow.AddDays(-10), Value = profile }));
+        int refreshing = 0, cancelled = 0;
+        var slowHttp = new DiscoveryTests.Http { Override = async (request, ct) =>
+        {
+            if (ArtistCatalog.ArtworkUrl(request.RequestUri?.AbsoluteUri))
+            { var image = new ByteArrayContent(DiscoveryTests.Cover); image.Headers.ContentType = new("image/png"); return new(System.Net.HttpStatusCode.OK) { Content = image }; }
+            Interlocked.Exchange(ref refreshing, 1);
+            try { await Task.Delay(Timeout.Infinite, ct); } catch (OperationCanceledException) { Interlocked.Exchange(ref cancelled, 1); throw; }
+            return new();
+        } };
+        using var slowCatalog = DiscoveryTests.Catalog(staleFolder, slowHttp);
+        var savedView = (UserControl)Activator.CreateInstance(artistView.GetType())!; savedView.DataContext = artistVm; shell.CurrentView = artistVm;
+        var savedWindow = new Window { Content = savedView, Width = 1280, Height = 950 }; savedWindow.Show();
+        using var savedPages = new NativeCatalogPages(() => slowCatalog, actions, logs.Add, () => true, () => shell, window: () => savedWindow);
+        Check.Until(() => Volatile.Read(ref refreshing) == 1 && Values(Get(artistVm, "Releases")).Count == 2, "stale cached releases render before slow provider response completes");
+        Check.True(savedView.GetVisualDescendants().OfType<ProgressBar>().Any(p => p.IsVisible && p.IsIndeterminate), "native artist page shows a subtle loading indicator during background refresh");
+        shell.CurrentView = new object(); savedWindow.Content = new UserControl();
+        Check.Until(() => Volatile.Read(ref cancelled) == 1, "navigating away cancels the old artist request and frees the network gate");
+        var returnView = (UserControl)Activator.CreateInstance(artistView.GetType())!; returnView.DataContext = artistVm; shell.CurrentView = artistVm; savedWindow.Content = returnView;
+        Check.Until(() => returnView.GetVisualDescendants().OfType<TextBlock>().Any(t => t.Text?.Contains("cached catalog") == true) && Values(Get(artistVm, "Releases")).Count == 2, "returning to a cancelled artist immediately restores its saved releases and resumes refresh");
+        savedWindow.Close(); savedPages.Dispose();
         ((IDisposable)albumVm).Dispose(); ((IDisposable)artistVm).Dispose();
         if (player is IDisposable disposable) disposable.Dispose();
     }
     private static T Finish<T>(Task<T> task) { Check.Until(() => task.IsCompleted, "native catalog operation completed"); return task.GetAwaiter().GetResult(); }
     private static void Finish(Task task) { Check.Until(() => task.IsCompleted, "native catalog operation completed"); task.GetAwaiter().GetResult(); }
-    private sealed class Shell(object library, object player) { private readonly object _library = library; public object Player { get; } = player; public object? CurrentView { get; set; } }
+    private sealed class Shell(object library, object player) : System.ComponentModel.INotifyPropertyChanged
+    {
+        private readonly object _library = library; public object Player { get; } = player;
+        private object? _current; public object? CurrentView { get => _current; set { _current = value; PropertyChanged?.Invoke(this, new(nameof(CurrentView))); } }
+        public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+    }
     private static void Save(Window window, string? folder, string name)
     {
         if (string.IsNullOrWhiteSpace(folder)) return; Directory.CreateDirectory(folder); Dispatcher.UIThread.RunJobs(); AvaloniaHeadlessPlatform.ForceRenderTimerTick();

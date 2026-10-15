@@ -19,6 +19,10 @@ There are no selection checkboxes. Browsing never starts an audio download.
 the explicit version. Deluxe and other distinct editions stay separate. Existing international
 album tags open the full catalog listing, and album header covers now load and survive rescans.
 
+**2.8.2:** saved releases appear immediately while updates load in the background. Artist pages
+react to navigation immediately, reuse cached metadata/covers and show a small loading bar.
+First visits still need your connection; switching artists cancels the previous page's request.
+
 For an artist outside your library: Finder → **Artists** → search → **Open in Noctis**.
 If several artists share the same name, pick the right genre/identity once. Download progress
 is in Finder → **Queue**. Noctis must scan downloaded songs before they become playable.

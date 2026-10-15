@@ -21,7 +21,7 @@ internal static class NativeCatalogBridge
     }
     private static FieldInfo Field(object vm, string name) => vm.GetType().GetField(name, Private) ?? throw Unsupported(name);
     internal static IReadOnlyList<object> Values(object? values) => values is IEnumerable sequence ? sequence.Cast<object>().ToArray() : [];
-    internal static Dictionary<object, CatalogRelease> ApplyArtist(object vm, CatalogProfile profile)
+    internal static Dictionary<object, CatalogRelease> ApplyArtist(object vm, CatalogProfile profile, Dictionary<object, CatalogRelease>? previous = null, bool consolidated = false)
     {
         if (vm.GetType().FullName != "Noctis.ViewModels.ArtistDetailViewModel") throw Unsupported("artist view model");
         var releasesField = Field(vm, "_allReleases"); var appearsField = Field(vm, "_allAppearsOn");
@@ -31,16 +31,19 @@ internal static class NativeCatalogBridge
         var existing = Values(releasesField.GetValue(vm)); var appears = Values(appearsField.GetValue(vm));
         var map = new Dictionary<object, CatalogRelease>(ReferenceEqualityComparer.Instance);
         var native = new List<object>(); var featured = new List<object>();
-        var releases = CatalogEditions.Consolidate(profile.Releases);
+        var releases = consolidated ? profile.Releases : CatalogEditions.Consolidate(profile.Releases);
+        var ownedByEdition = existing.Concat(appears).GroupBy(a => (CatalogEditions.Key(Get(a, "Name") as string ?? ""), BotText.Key(Get(a, "Artist") as string))).ToDictionary(g => g.Key, g => g.First());
+        var represented = releases.Select(r => (CatalogEditions.Key(r.Title), BotText.Key(r.Artist.Name))).ToHashSet();
+        var reusable = previous?.ToDictionary(p => p.Value.Id, p => p);
         foreach (var release in releases)
         {
-            var owned = existing.Concat(appears).FirstOrDefault(a => CatalogEditions.Matches(release, Get(a, "Name") as string ?? "", Get(a, "Artist") as string ?? ""));
-            var album = Album(type, release, owned);
+            ownedByEdition.TryGetValue((CatalogEditions.Key(release.Title), BotText.Key(release.Artist.Name)), out var owned);
+            var album = reusable is not null && reusable.TryGetValue(release.Id, out var found) && found.Value == release ? found.Key : Album(type, release, owned);
             map.Add(album, release);
             (release.Artist.Id == profile.Artist.Id ? native : featured).Add(album);
         }
         // Same-name local releases are represented by a catalog tile; local-only/unreleased albums stay.
-        bool Represented(object a) => releases.Any(r => CatalogEditions.Matches(r, Get(a, "Name") as string ?? "", Get(a, "Artist") as string ?? ""));
+        bool Represented(object a) => represented.Contains((CatalogEditions.Key(Get(a, "Name") as string ?? ""), BotText.Key(Get(a, "Artist") as string)));
         native.AddRange(existing.Where(a => !Represented(a))); featured.AddRange(appears.Where(a => !Represented(a)));
         var oldReleases = releasesField.GetValue(vm); var oldAppears = appearsField.GetValue(vm); var oldLatest = Get(vm, "LatestRelease");
         try

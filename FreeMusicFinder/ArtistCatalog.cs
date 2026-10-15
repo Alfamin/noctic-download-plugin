@@ -30,7 +30,9 @@ internal sealed class ArtistCatalog : IDisposable
     private DateTimeOffset _nextApple;
     private readonly Dictionary<string, DateTimeOffset> _wait = new();
     private readonly SemaphoreSlim _artGate = new(2, 2);
-    private sealed record Cache<T>(int Version, DateTimeOffset SavedAt, T Value);
+    private readonly Dictionary<string, object> _memory = new();
+    private readonly Dictionary<string, (CatalogProfile Raw, CatalogProfile View)> _profileViews = new();
+    private sealed record Cache<T>(int Version, DateTimeOffset SavedAt, T Value, string Warning = "");
     private static readonly JsonSerializerOptions Json = new() { MaxDepth = 64 };
 
     public ArtistCatalog(string folder, HttpMessageHandler? handler = null, Func<DateTimeOffset>? now = null, TimeSpan? applePace = null)
@@ -80,9 +82,8 @@ internal sealed class ArtistCatalog : IDisposable
                 using var detail = await Get(provider, "/artist/" + id, ct);
                 var actual = DeezerArtist(detail.RootElement);
                 if (actual?.Id != artist.Id) throw Invalid("Artist identity did not match the requested profile.");
-                using var popular = await Get(provider, "/artist/" + id + "/top?limit=10", ct);
                 var releases = (await Pages("/artist/" + id + "/albums?limit=100", ct)).Select(a => DeezerRelease(a, actual)).Where(a => a is not null).Cast<CatalogRelease>().ToList();
-                value = new(actual, Data(popular.RootElement).Select(t => DeezerSong(t)).Where(t => t is not null).Cast<CatalogSong>().ToList(), releases);
+                value = new(actual, [], releases);
             }
             else
             {
@@ -90,19 +91,36 @@ internal sealed class ArtistCatalog : IDisposable
                 var all = Results(releases.RootElement).ToArray();
                 var actual = all.Where(a => Text(a, "wrapperType") == "artist").Select(AppleArtist).FirstOrDefault(a => a?.Id == artist.Id);
                 if (actual is null) throw Invalid("The artist is unavailable in Apple's US catalog.");
-                using var popular = await Get(provider, "/lookup?id=" + id + "&entity=song&limit=10&country=US", ct);
                 var albums = all.Where(a => Text(a, "wrapperType") == "collection").Select(AppleRelease).Where(a => a is not null).Cast<CatalogRelease>().ToList();
-                value = new(actual, Results(popular.RootElement).Select(AppleSong).Where(t => t is not null).Cast<CatalogSong>().ToList(), albums,
-                    "Apple US catalog · popular songs use catalog order. Regional availability and provider limits mean this is not a guaranteed complete discography." + (albums.Count >= 200 ? " The 200-release limit was reached." : ""));
+                value = new(actual, [], albums,
+                    "Apple US catalog. Regional availability and provider limits mean this is not a guaranteed complete discography." + (albums.Count >= 200 ? " The 200-release limit was reached." : ""));
             }
             // Refresh adds/updates metadata without deleting previously seen releases, even if a store removes one.
             var old = Read<CatalogProfile>("artist:" + artist.Id);
-            value = value with { Releases = value.Releases.Concat(old?.Value.Releases ?? []).DistinctBy(a => a.Id).OrderByDescending(a => a.Date, StringComparer.Ordinal).ToList() };
+            value = value with { Popular = old?.Value.Popular ?? [], Releases = value.Releases.Concat(old?.Value.Releases ?? []).DistinctBy(a => a.Id).OrderByDescending(a => a.Date, StringComparer.Ordinal).ToList() };
             return value;
         }, ct).ConfigureAwait(false);
         // Normalize at the read boundary as well: existing 2.8.0 caches must improve
         // immediately, without requiring a refresh or deleting their saved metadata.
-        return result with { Value = result.Value with { Releases = CatalogEditions.Consolidate(result.Value.Releases) } };
+        return Normalize(result);
+    }
+    public async Task<CatalogResult<CatalogProfile>?> SavedArtistAsync(CatalogArtist artist, CancellationToken ct)
+    {
+        Split(artist.Id); var saved = await ReadAsync<CatalogProfile>("artist:" + artist.Id, ct).ConfigureAwait(false);
+        return saved is null ? null : Normalize(new(saved.Value, saved.SavedAt, true, saved.Warning));
+    }
+    private CatalogResult<CatalogProfile> Normalize(CatalogResult<CatalogProfile> result)
+    {
+        lock (_profileViews)
+        {
+            var raw = result.Value;
+            if (!_profileViews.TryGetValue(raw.Artist.Id, out var found) || !ReferenceEquals(found.Raw, raw))
+            {
+                if (_profileViews.Count >= 48) _profileViews.Remove(_profileViews.Keys.First());
+                found = (raw, raw with { Releases = CatalogEditions.Consolidate(raw.Releases) }); _profileViews[raw.Artist.Id] = found;
+            }
+            return result with { Value = found.View };
+        }
     }
 
     public Task<CatalogResult<CatalogAlbum>> AlbumAsync(CatalogRelease album, bool refresh, CancellationToken ct)
@@ -130,11 +148,15 @@ internal sealed class ArtistCatalog : IDisposable
 
     private async Task<CatalogResult<T>> Cached<T>(string key, TimeSpan age, bool refresh, Func<Task<T>> fetch, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
+        var savedBeforeWait = await ReadAsync<T>(key, ct).ConfigureAwait(false);
+        // Fresh local data never queues behind an unrelated slow network operation.
+        if (!refresh && savedBeforeWait is not null && _now() - savedBeforeWait.SavedAt < age) return new(savedBeforeWait.Value, savedBeforeWait.SavedAt, true, savedBeforeWait.Warning);
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             var old = Read<T>(key);
-            if (!refresh && old is not null && _now() - old.SavedAt < age) return new(old.Value, old.SavedAt, true);
+            if (!refresh && old is not null && _now() - old.SavedAt < age) return new(old.Value, old.SavedAt, true, old.Warning);
             try
             {
                 var value = await fetch().ConfigureAwait(false); ct.ThrowIfCancellationRequested();
@@ -142,6 +164,7 @@ internal sealed class ArtistCatalog : IDisposable
                 try { AtomicJson.Write(SafeFile(Key(key))!, saved); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
                 { warning = "CATALOG_CACHE_SAVE_FAILED: Results are available, but could not be saved for offline use."; }
+                Remember(key, saved with { Warning = warning });
                 return new(value, saved.SavedAt, false, warning);
             }
             catch (Exception ex) when (old is not null && Recoverable(ex))
@@ -151,15 +174,23 @@ internal sealed class ArtistCatalog : IDisposable
     }
     private Cache<T>? Read<T>(string key)
     {
+        if (Memory<T>(key) is {} memory) return memory;
         try
         {
             var path = SafeFile(Key(key))!;
             if (!File.Exists(path) || new FileInfo(path).Length > 4 * 1024 * 1024) return null;
             var data = JsonSerializer.Deserialize<Cache<T>>(File.ReadAllText(path), Json);
-            return data is { Version: 1, Value: not null } && data.SavedAt <= _now().AddMinutes(5) ? data : null;
+            if (data is not { Version: 1, Value: not null } || data.SavedAt > _now().AddMinutes(5)) return null;
+            Remember(key, data); return data;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException) { return null; }
     }
+    private Cache<T>? Memory<T>(string key) { lock (_memory) return _memory.GetValueOrDefault(key) as Cache<T>; }
+    private void Remember<T>(string key, Cache<T> value)
+    {
+        lock (_memory) { if (_memory.Count >= 96 && !_memory.ContainsKey(key)) _memory.Remove(_memory.Keys.First()); _memory[key] = value; }
+    }
+    private Task<Cache<T>?> ReadAsync<T>(string key, CancellationToken ct) => Memory<T>(key) is {} cached ? Task.FromResult<Cache<T>?>(cached) : Task.Run(() => Read<T>(key), ct);
     private static string Key(string key) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))).ToLowerInvariant() + ".json";
     private string? SafeFile(string name)
     {

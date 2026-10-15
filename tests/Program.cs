@@ -45,6 +45,7 @@ try
     await BotSelectionTests.RunAsync();
     await SpotifyPlaylistTests.RunAsync();
     await DiscoveryTests.RunAsync();
+    await CatalogPerformanceTests.RunAsync();
     await DiscoveryNetworkTests.RunAsync();
     await LivePlaylistTest.RunAsync(Environment.GetEnvironmentVariable("FMF_SPOTIFY_PLAYLIST"), Environment.GetEnvironmentVariable("FMF_LIBRARY_SNAPSHOT"), Environment.GetEnvironmentVariable("FMF_LIVE_REPORT"));
 

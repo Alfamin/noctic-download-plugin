@@ -1,4 +1,5 @@
 using System.Collections;
+using System.ComponentModel;
 using System.Reflection;
 using Avalonia;
 using Avalonia.Controls;
@@ -26,7 +27,10 @@ internal sealed class NativeCatalogPages : IDisposable
     private readonly Func<bool> _enabled;
     private readonly Action<string> _log;
     private readonly DispatcherTimer _timer;
-    private readonly IDisposable _clickGuard, _contextGuard;
+    private readonly IDisposable _clickGuard, _contextGuard, _loadedGuard;
+    private INotifyPropertyChanged? _shellNotify, _viewNotify;
+    private object? _observedView;
+    private int _scanQueued;
     private readonly CancellationTokenSource _stop = new();
     private readonly Dictionary<object, ArtistState> _artists = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<object, AlbumState> _albums = new(ReferenceEqualityComparer.Instance);
@@ -45,7 +49,10 @@ internal sealed class NativeCatalogPages : IDisposable
         public object Vm = vm; public UserControl Page = page; public StackPanel Panel = panel;
         public readonly WrapPanel Strip = new() { Margin = new Thickness(32, 8, 32, 8) };
         public readonly TextBlock Status = new() { Opacity = .65, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
-        public CatalogProfile? Profile; public List<object> Tiles = new();
+        public CatalogProfile? Profile; public Dictionary<object, CatalogRelease> CurrentTiles = new(ReferenceEqualityComparer.Instance);
+        public readonly ProgressBar Loading = new() { IsIndeterminate = true, Width = 80, Height = 3, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+        public CancellationTokenSource? LoadStop;
+        public bool Interrupted;
         public IReadOnlyList<object> Displayed = []; public string ViewKey = "";
         public bool Busy;
         public EventHandler<RoutedEventArgs>? Click;
@@ -90,7 +97,35 @@ internal sealed class NativeCatalogPages : IDisposable
         {
             if (!_disposed && TileAt(control) is {} tile && !UseOwnedContext(control, tile)) e.Handled = true;
         });
+        _loadedGuard = Control.LoadedEvent.AddClassHandler<UserControl>((page, _) =>
+        {
+            if (page.GetType().FullName is "Noctis.Views.ArtistDetailView" or "Noctis.Views.AlbumDetailView") QueueScan();
+        });
         _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) }; _timer.Tick += (_, _) => Scan(); _timer.Start();
+        QueueScan();
+    }
+    private void QueueScan()
+    {
+        if (_disposed || Interlocked.Exchange(ref _scanQueued, 1) != 0) return;
+        Dispatcher.UIThread.Post(() => { Interlocked.Exchange(ref _scanQueued, 0); if (!_disposed) Scan(); }, DispatcherPriority.Loaded);
+    }
+    private void OnShellChanged(object? sender, PropertyChangedEventArgs e) { if (e.PropertyName is null or "" or "CurrentView") QueueScan(); }
+    private void OnViewChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is "SelectedTab" or "GridColumns" or "AlbumCount" or "SingleCount" or "ReleaseSortMode") QueueScan();
+    }
+    private void Observe(object main, object? current)
+    {
+        if (!ReferenceEquals(_shellNotify, main as INotifyPropertyChanged))
+        {
+            if (_shellNotify is not null) _shellNotify.PropertyChanged -= OnShellChanged;
+            _shellNotify = main as INotifyPropertyChanged; if (_shellNotify is not null) _shellNotify.PropertyChanged += OnShellChanged;
+        }
+        if (ReferenceEquals(_observedView, current)) return;
+        _observedView = current;
+        foreach (var state in _artists.Values.Where(s => s.Busy && !ReferenceEquals(s.Vm, current))) { state.Interrupted = true; state.LoadStop?.Cancel(); }
+        if (_viewNotify is not null) _viewNotify.PropertyChanged -= OnViewChanged;
+        _viewNotify = current as INotifyPropertyChanged; if (_viewNotify is not null) _viewNotify.PropertyChanged += OnViewChanged;
     }
     internal void Scan()
     {
@@ -101,7 +136,8 @@ internal sealed class NativeCatalogPages : IDisposable
             var window = _window();
             if (window is null || _main() is not {} main) return;
             var current = Get(main, "CurrentView");
-            foreach (var page in window.GetVisualDescendants().OfType<UserControl>().ToArray())
+            Observe(main, current);
+            foreach (var page in window.GetVisualDescendants().OfType<UserControl>().Where(p => ReferenceEquals(p.DataContext, current) && p.GetType().FullName is "Noctis.Views.ArtistDetailView" or "Noctis.Views.AlbumDetailView").Take(1).ToArray())
             {
                 if (page.DataContext is not {} vm || !ReferenceEquals(vm, current)) continue;
                 if (page.GetType().FullName == "Noctis.Views.ArtistDetailView")
@@ -110,6 +146,7 @@ internal sealed class NativeCatalogPages : IDisposable
                     else if (_artists.TryGetValue(vm, out var state))
                     {
                         if (!ReferenceEquals(state.Page, page)) ReattachArtist(state, page);
+                        if (state.Interrupted && !state.Busy) _ = LoadArtist(page, vm);
                         if (state.Profile is not null && (!Values(Get(vm, "Releases")).SequenceEqual(state.Displayed) || ViewKey(vm) != state.ViewKey)) Apply(state);
                     }
                 }
@@ -125,7 +162,8 @@ internal sealed class NativeCatalogPages : IDisposable
                     }
                 }
             }
-            foreach (var button in window.GetVisualDescendants().OfType<Button>().Where(b => b.IsEffectivelyVisible && b.DataContext is {} tile && _tiles.ContainsKey(tile)))
+            if (current is null || !_artists.TryGetValue(current, out var shown)) return;
+            foreach (var button in shown.Page.GetVisualDescendants().OfType<Button>().Where(b => b.IsEffectivelyVisible && b.DataContext is {} tile && _tiles.ContainsKey(tile)))
             {
                 var at = button.TranslatePoint(default, window);
                 if (at is not {} point || point.Y + button.Bounds.Height < 0 || point.Y > window.Bounds.Height) continue;
@@ -159,6 +197,7 @@ internal sealed class NativeCatalogPages : IDisposable
     {
         if (_artists.TryGetValue(vm, out var active) && active.Busy) return;
         ArtistState? state = null;
+        CancellationTokenSource? loading = null;
         try
         {
             var panel = page.FindControl<StackPanel>("PageContent") ?? throw Unsupported("artist sections");
@@ -171,17 +210,25 @@ internal sealed class NativeCatalogPages : IDisposable
                 state.Click = (_, e) => ArtistClick(captured, e); page.AddHandler(Button.ClickEvent, state.Click, RoutingStrategies.Bubble);
                 state.Context = (_, e) => { if (TileAt(e.Source as Control) is not null) e.Handled = true; }; page.AddHandler(Control.ContextRequestedEvent, state.Context, RoutingStrategies.Tunnel | RoutingStrategies.Bubble);
             }
-            state.Busy = true; state.Strip.Children.Clear(); state.Strip.Children.Add(state.Status); state.Status.Text = "Reading online catalog… Your local music stays available.";
+            state.Busy = true; state.Interrupted = false; state.LoadStop = loading = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
+            state.Loading.IsVisible = true; state.Strip.Children.Clear(); state.Strip.Children.Add(state.Status); state.Strip.Children.Add(state.Loading); state.Status.Text = "Loading releases… Your local music stays available.";
             var name = Get(vm, "ArtistName") as string ?? "";
-            var identity = await ResolveArtist(name, state.Strip, _stop.Token, chosen => { _ = LoadArtist(page, vm); });
+            var identity = await ResolveArtist(name, state.Strip, loading.Token, chosen => { _ = LoadArtist(state.Page, vm); });
             if (identity is null) { state.Status.Text = "Choose the artist's catalog once (several artists share this name):"; return; }
-            var result = await _catalog().ArtistAsync(identity, refresh, _stop.Token); if (_disposed || !_enabled() || !_artists.ContainsKey(vm)) return;
-            state.Profile = result.Value; Apply(state);
-            state.Status.Text = $"{result.Value.Releases.Count} online releases · {(identity.Id.StartsWith("apple:") ? "Apple Music" : "Deezer")}" + (result.Cached ? " · saved catalog" : "");
+            var saved = await _catalog().SavedArtistAsync(identity, loading.Token); loading.Token.ThrowIfCancellationRequested();
+            if (_disposed || !_enabled() || !_artists.ContainsKey(vm)) return;
+            if (saved is not null)
+            {
+                if (!ReferenceEquals(state.Profile, saved.Value)) { state.Profile = saved.Value; Apply(state); }
+                state.Status.Text = $"{saved.Value.Releases.Count} online releases · cached catalog · checking for updates…";
+            }
+            var result = await _catalog().ArtistAsync(identity, refresh, loading.Token); if (_disposed || !_enabled() || !_artists.ContainsKey(vm)) return;
+            if (!ReferenceEquals(state.Profile, result.Value)) { state.Profile = result.Value; Apply(state); }
+            state.Status.Text = $"{result.Value.Releases.Count} online releases · {(identity.Id.StartsWith("apple:") ? "Apple Music" : "Deezer")}" + (result.Cached ? " · cached catalog" : "");
             ToolTip.SetTip(state.Status, result.Value.Notice + " " + result.Warning);
             var retry = NativeButton("Refresh catalog"); retry.Click += (_, _) => { _ = LoadArtist(page, vm, true); }; state.Strip.Children.Add(retry);
         }
-        catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
+        catch (OperationCanceledException) when (_stop.IsCancellationRequested || loading?.IsCancellationRequested == true) { }
         catch (Exception ex)
         {
             if (state is not null && !_disposed)
@@ -191,13 +238,17 @@ internal sealed class NativeCatalogPages : IDisposable
             }
             else _log("CATALOG_HOST_UNSUPPORTED: " + ex.Message);
         }
-        finally { if (state is not null) state.Busy = false; _pending.Remove(vm); }
+        finally
+        {
+            if (state is not null) { state.Busy = false; state.Loading.IsVisible = false; state.LoadStop = null; if (state.Interrupted) QueueScan(); }
+            loading?.Dispose(); _pending.Remove(vm);
+        }
     }
     private void Apply(ArtistState state)
     {
         // Keep aliases until the artist state is restored: outgoing controls can receive input
         // before the next layout turn after a rescan. They still need the metadata-only guard.
-        var added = ApplyArtist(state.Vm, state.Profile!); state.Tiles.AddRange(added.Keys); foreach (var pair in added) _tiles[pair.Key] = pair.Value;
+        var added = ApplyArtist(state.Vm, state.Profile!, state.CurrentTiles, consolidated: true); state.CurrentTiles = added; foreach (var pair in added) _tiles[pair.Key] = pair.Value;
         state.Displayed = Values(Get(state.Vm, "Releases")); state.ViewKey = ViewKey(state.Vm);
     }
     private static string ViewKey(object vm) => string.Join("|", Get(vm, "SelectedTab"), Get(vm, "ReleaseSortMode"), Get(vm, "GridColumns"), vm.GetType().GetField("_query", Private)?.GetValue(vm));
@@ -360,13 +411,17 @@ internal sealed class NativeCatalogPages : IDisposable
     }
     public void Dispose()
     {
-        if (_disposed) return; _disposed = true; _stop.Cancel(); _openStop?.Cancel(); _timer.Stop(); _clickGuard.Dispose(); _contextGuard.Dispose(); RestorePages();
+        if (_disposed) return; _disposed = true; _stop.Cancel(); _openStop?.Cancel(); _timer.Stop(); _clickGuard.Dispose(); _contextGuard.Dispose(); _loadedGuard.Dispose();
+        if (_shellNotify is not null) _shellNotify.PropertyChanged -= OnShellChanged;
+        if (_viewNotify is not null) _viewNotify.PropertyChanged -= OnViewChanged;
+        RestorePages();
     }
     private void RestorePages()
     {
         foreach (var state in _albums.Values) RestoreAlbum(state);
         foreach (var state in _artists.Values)
         {
+            state.LoadStop?.Cancel();
             if (state.Click is not null) state.Page.RemoveHandler(Button.ClickEvent, state.Click);
             if (state.Context is not null) state.Page.RemoveHandler(Control.ContextRequestedEvent, state.Context);
             state.Panel.Children.Remove(state.Strip); try { RestoreArtist(state.Vm); } catch { }
