@@ -9,6 +9,22 @@ You need: Noctis 1.5.3 or newer, a Telegram account, and the file
 
 ## 1. Install the zip
 
+**New in 2.8 (Noctis 1.6.3):** open any artist's normal Noctis page to see online albums and
+singles alongside your local releases. Click an album for its ordered track list. Owned songs
+play normally; missing songs show **Download now** and **Queue download**. Ctrl+click several
+missing rows, then **Queue N downloads**, or use **Download all missing…** and confirm.
+There are no selection checkboxes. Browsing never starts an audio download.
+
+For an artist outside your library: Finder → **Artists** → search → **Open in Noctis**.
+If several artists share the same name, pick the right genre/identity once. Download progress
+is in Finder → **Queue**. Noctis must scan downloaded songs before they become playable.
+The native **Add to Queue** button still adds owned songs to the playback queue.
+
+Metadata and covers use your existing Finder/system proxy settings. Saved catalogs remain
+usable offline; **Refresh catalog** checks again. Provider catalogs can omit regional or
+unreleased material. Popular/All Songs lists still show local music. You can turn off
+**Fill artist and album pages from online catalogs** in the plugin settings.
+
 **New in 2.6:** the **Playlists** tab brings your Spotify playlists into Noctis using the music
 you already have. Paste several playlist links, one per line → **Create playlists** → review
 **Missing songs** → **Queue all missing songs** → **Start queued downloads**. For one playlist
@@ -81,7 +97,7 @@ Your phone number, login code and two-step password are never filled in by someo
 ## 5. Search and download
 
 1. Type an artist and title and press Enter.
-2. Press **Download now** to put that song ahead of the backlog, or **Add to queue** to download it later. **Queue all** adds the search results to the batch.
+2. Press **Download now** to put that song ahead of the backlog, or **Queue download** to download it later. **Queue all** adds the search results to the batch.
 
 **Download now** works while the batch is paused. A file already transferring finishes first;
 bot limits still apply. Search results and saved requests have separate **Search** and **Queue** tabs.

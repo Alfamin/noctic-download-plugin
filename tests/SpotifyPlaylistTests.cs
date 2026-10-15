@@ -15,7 +15,8 @@ internal static class SpotifyPlaylistTests
         public Dictionary<Guid, string> Names = new();
         public bool Denied;
         public int Saves;
-        public Task<IReadOnlyList<LocalSong>> SnapshotAsync() => Task.FromResult<IReadOnlyList<LocalSong>>(Songs.ToArray());
+        public Exception? ReadError;
+        public Task<IReadOnlyList<LocalSong>> SnapshotAsync() => ReadError is {} error ? Task.FromException<IReadOnlyList<LocalSong>>(error) : Task.FromResult<IReadOnlyList<LocalSong>>(Songs.ToArray());
         public Task ApplyAsync(Guid id, string name, string url, IReadOnlyList<Guid> tracks, bool create, IReadOnlyList<Guid> expected, IReadOnlyList<Guid>? remappedExpected = null)
         {
             if (Denied) throw new UnauthorizedAccessException("Synthetic denied");

@@ -277,8 +277,8 @@ internal static class WindowTests
         File.WriteAllText(dead, "x");
         File.SetLastWriteTimeUtc(dead, DateTime.UtcNow.AddHours(-1));
 
-        var plugin = new FreeMusicPlugin();
-        Check.Equal("2.7.0", plugin.Info.Version, "the version is the one in plugin.json");
+        var plugin = new FreeMusicPlugin((data, _) => DiscoveryTests.Catalog(data, new DiscoveryTests.Http()));
+        Check.Equal("2.8.0", plugin.Info.Version, "the version is the one in plugin.json");
         plugin.Initialize(host);
         Check.Equal("Find more by this artist…", string.Join(",", host.Commands.Select(c => c.Label)), "one track menu entry");
         Check.Until(() => !File.Exists(dead), "what an interrupted download left behind is removed at the start");
@@ -292,8 +292,9 @@ internal static class WindowTests
 
         host.Commands[0].Handler(new TrackInfo("7", "Some Song", "Somebody", "", "", TimeSpan.Zero, 0, "", 0, "", false, 0, 0));
         Check.True(ReferenceEquals(window, Window()), "the menu entry uses the open window");
-        Check.Equal("Somebody", window is null ? null : Query(window).Text, "and searches for the track's artist");
-        Check.Until(() => window is not null && Status(window) == "Log in to Telegram to search.", "which needs the login first");
+        var discovery = Field<DiscoveryView>(window!, "_discovery");
+        Check.Equal("Somebody", Field<TextBox>(discovery, "_query").Text, "and searches the online artist catalog");
+        Check.Until(() => discovery.GetVisualDescendants().OfType<Button>().Any(b => Equals(b.Content, "Open in Noctis →")), "catalog browsing needs no Telegram login");
 
         // A download that finishes while the window is closed is announced by the plugin itself.
         window?.Close();
@@ -357,7 +358,7 @@ internal static class WindowTests
         var again = new FakeHost(Check.NewFolder("plugin/again"), music);
         again.Values["shortcut"] = Shortcut.Default;
         again.Values["proxy"] = "nonsense";
-        var restarted = new FreeMusicPlugin();
+        var restarted = new FreeMusicPlugin((data, _) => DiscoveryTests.Catalog(data, new DiscoveryTests.Http()));
         string? stopped = null;
         try { restarted.Initialize(again); }
         catch (Exception ex) { stopped = ex.Message; }
@@ -399,7 +400,7 @@ internal static class WindowTests
         bot.Answers["queue demo"]=()=>new[]{LogicTests.Track("New queue demo")};
         window.Search("queue demo");Check.Until(()=>Rows(window).Count==1,"search usable after clearing");
         var result=((StackPanel)typeof(SearchWindow).GetField("_results",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(window)!).Children.OfType<Border>().Select(b => b.Child).OfType<Grid>().First();
-        var add=result.Children.OfType<Button>().Single(b=>Equals(b.Content,"Add to queue"));
+        var add=result.Children.OfType<Button>().Single(b=>Equals(b.Content,"Queue download"));
         Picture(window,"8 search and queue actions");Click(add);
         Check.Equal(1,downloads.Active.Count,"add to queue uses background lane");
         Check.False(downloads.Active.Single().Priority,"add to queue respects paused batch");
@@ -454,7 +455,7 @@ internal static class WindowTests
     /// <summary>Each row's button: its label, then "+" when it can be pressed and "-" when not.</summary>
     private static string Buttons(IEnumerable<RowView> rows) => string.Join(" ", rows.Select(r => r.Button.Content + (r.Button.IsEnabled ? "+" : "-")));
 
-    private static T Field<T>(SearchWindow window, string name) => (T)typeof(SearchWindow).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(window)!;
+    private static T Field<T>(object window, string name) => (T)window.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(window)!;
     private static string Status(SearchWindow window) => Field<TextBlock>(window, "_status").Text ?? "";
 
     private static Button DownloadAll(SearchWindow window) => Field<Button>(window, "_downloadAllButton");

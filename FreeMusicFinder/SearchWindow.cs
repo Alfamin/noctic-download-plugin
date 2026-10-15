@@ -45,16 +45,18 @@ internal sealed class SearchWindow : Window
     private readonly QueueView _queueView;
     private readonly PlaylistView? _playlistView;
     private readonly Border _queueCard;
+    private readonly DiscoveryView? _discovery;
 
     /// <param name="searchBot">Asks the bot for the tracks that match a text.</param>
     public SearchWindow(IPluginHost host, TelegramAccount telegram, Downloads downloads,
-        Func<string, CancellationToken, Task<IReadOnlyList<BotTrack>>> searchBot,PlaylistTransfers? transfers=null,SpotifyPlaylists? playlists=null)
+        Func<string, CancellationToken, Task<IReadOnlyList<BotTrack>>> searchBot,PlaylistTransfers? transfers=null,SpotifyPlaylists? playlists=null, DiscoveryView? discovery=null)
     {
         _host = host;
         _telegram = telegram;
         _downloads = downloads;
         _searchBot = searchBot;
         _transfers=transfers;
+        _discovery = discovery;
 
         Title = "Free Music Finder";
         FinderTheme.Apply(this);
@@ -132,11 +134,12 @@ internal sealed class SearchWindow : Window
             _playlistView = new PlaylistView(playlists, downloads, () => DownloadFolder, () => _telegram.IsLoggedIn);
             tabs.Add(new TabItem { Header = "Playlists", Content = _playlistView });
         }
+        if (discovery is not null) tabs.Add(new TabItem { Header = "Artists", Content = discovery });
         _tabs=new TabControl {ItemsSource=tabs};
         top.Margin = new Thickness(0, 0, 0, 12);
         var header = new StackPanel { Spacing = 6 };
         header.Children.Add(new TextBlock { Text = "Free Music Finder", FontSize = 25, FontWeight = FontWeight.SemiBold });
-        header.Children.Add(FinderTheme.Caption("Find a song, manage downloads, or bring your Spotify playlists into Noctis."));
+        header.Children.Add(FinderTheme.Caption("Find a song, discover artists, or bring your Spotify playlists into Noctis."));
         header.Children.Add(top); top.Margin = new Thickness(0, 8, 0, 0);
         var root = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto"), Margin = new Thickness(20), RowSpacing = 12 };
         root.Children.Add(header);
@@ -146,7 +149,7 @@ internal sealed class SearchWindow : Window
         {
             top.IsVisible = _tabs.SelectedIndex == 0;
             _downloadAllButton.IsVisible = _tabs.SelectedIndex == 0;
-            _status.IsVisible = _tabs.SelectedIndex != 2;
+            _status.IsVisible = _tabs.SelectedItem is not TabItem { Content: PlaylistView or DiscoveryView };
             ShowQueue();
         };
         Grid.SetRow(_tabs, 2);
@@ -156,7 +159,7 @@ internal sealed class SearchWindow : Window
         Content = root;
         var welcome = new StackPanel { Spacing = 8, Margin = new Thickness(6, 12) };
         welcome.Children.Add(new TextBlock { Text = "What do you want to listen to?", FontSize = 18, FontWeight = FontWeight.SemiBold });
-        welcome.Children.Add(FinderTheme.Caption("Search an artist or song above. Choose Download now for one song, or build a batch with Add to queue."));
+        welcome.Children.Add(FinderTheme.Caption("Search an artist or song above. Choose Download now for one song, or build a batch with Queue download."));
         _results.Children.Add(FinderTheme.Card(welcome));
 
         ShowTelegramState();
@@ -179,6 +182,7 @@ internal sealed class SearchWindow : Window
             if(_transfers is not null) _transfers.Changed-=OnTransferChanged;
             _queueTimer.Stop();
             _playlistView?.Dispose();
+            _discovery?.Dispose();
             _closed.Cancel();
             _search?.Cancel();
         };
@@ -227,6 +231,13 @@ internal sealed class SearchWindow : Window
     {
         _query.Text = query;
         StartSearch();
+    }
+
+    public void BrowseArtist(string name)
+    {
+        if (_discovery is null) { Search(name); return; }
+        _tabs.SelectedItem = ((IEnumerable<TabItem>)_tabs.ItemsSource!).Single(t => ReferenceEquals(t.Content, _discovery));
+        _discovery.Search(name, openExact: true);
     }
 
     private async void StartSearch()
@@ -305,7 +316,7 @@ internal sealed class SearchWindow : Window
         row.InLibrary = !row.OnDisk && row.Download is null && InLibrary(track);
         row.Show();
         button.Click += (_, _) => Download(row,true);
-        var queueButton=new Button {Content="Add to queue",Margin=new Thickness(6,0,0,0),VerticalAlignment=VerticalAlignment.Center};
+        var queueButton=new Button {Content="Queue download",Margin=new Thickness(6,0,0,0),VerticalAlignment=VerticalAlignment.Center};
         queueButton.Click+=(_,_)=>Download(row,false);
         row.QueueButton=queueButton;row.Show();
 
@@ -502,7 +513,7 @@ internal sealed class SearchWindow : Window
             if(QueueButton is not null)
             {
                 QueueButton.IsEnabled=CanStart;
-                QueueButton.Content=Download?.IsActive==true?"Queued":"Add to queue";
+                QueueButton.Content=Download?.IsActive==true?"Download queued":"Queue download";
             }
             ToolTip.SetTip(Button, state is DownloadState.Failed or DownloadState.Waiting ? Download!.Error : null);
         }

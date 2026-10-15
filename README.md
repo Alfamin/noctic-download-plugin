@@ -3,6 +3,11 @@
 Finds songs and imports Spotify/Deezer playlists through Music Hunters and DeezLoad using
 your own Telegram account, from inside [Noctis](https://github.com/heartached/Noctis).
 
+Version **2.8** fills Noctis's existing artist release sections and album pages with online
+catalog metadata. The native grids, tabs and track-row templates stay in use. Missing songs
+have **Download now** and **Queue download** actions; Ctrl+click selects several for download.
+Browsing requests metadata and cover art only. No audio is downloaded until you choose it.
+
 Version 2.6 adds a **Playlists** tab: paste several Spotify playlists, match songs across
 all local library folders, and create ordered Noctis playlists. Unique missing recordings wait
 in the shared queue until you start them; new downloads fill their original positions.
@@ -28,12 +33,14 @@ Know what this is before you use it:
 2. In Noctis: Settings → Plugins → turn on Community plugins → **Install from file…** → pick the zip.
 3. Enable the plugin and approve its permissions (track menu entry, notices, internet, reading the library).
 
-Needs Noctis 1.5.3 or newer (plugin API 1.1). Step-by-step instructions for users are in
+Core search/download needs Noctis 1.5.3 or newer (plugin API 1.1). Native catalog integration
+is tested against **Noctis 1.6.3** and checks its private view contracts before using them.
+Step-by-step instructions for users are in
 [README-USERS.md](README-USERS.md).
 
 ## Use
 
-Plugin API 1.1 cannot add a page or sidebar entry, so the plugin opens its own window:
+Open the Finder window for search, downloads, playlists or artist search:
 
 - press **Ctrl+Shift+F** anywhere in Noctis (Cmd+Shift+F on a Mac; change it or turn it off in
   the plugin's **Shortcut** setting),
@@ -44,7 +51,7 @@ The shortcut is not a plugin API feature: the plugin listens to key presses in N
 and takes only ones Noctis has not handled, so if Noctis itself uses the same keys, Noctis wins.
 
 The first time, press **Log in to Telegram…** (see below). Then type an artist and title, press
-Enter, and press **Download now** for priority, **Add to queue** for batch work, or **Queue all**. A search sends `/search <your text>`
+Enter, and press **Download now** for priority, **Queue download** for batch work, or **Queue all**. A search sends `/search <your text>`
 to the bot from your account and lists its first page of results; a download makes the bot send
 the file.
 
@@ -79,6 +86,37 @@ While a file is being downloaded it is called `<name>.fmf.part`, so that neither
 anything else that watches the folder (the [WordLyrics](https://github.com/Alfamin/WordLyrics)
 plugin, for one) takes a half-written file for a song. What a download left behind when Noctis
 was closed in the middle of it is removed at the next start.
+
+## Browse artist catalogs in native pages
+
+Open a normal Noctis artist page. **Albums**, **Singles & EPs**, and **Appears On** keep their
+native layout and gain releases returned by the catalog. Local-only releases remain. To find
+an artist you do not own, open Finder → **Artists**, search, and choose **Open in Noctis**.
+If multiple artists share a name, choose the genre/provider identity once; that choice is saved.
+
+Open a release to see its ordered tracks on the native album page. Owned tracks keep native
+playback; missing tracks are slightly muted and offer **Download now** or **Queue download**.
+Ctrl+click missing rows, then **Queue N downloads**, or choose **Download all missing…** and
+confirm the count. Native **Add to Queue** still means the playback queue. Download progress,
+pause, retry and removal are in Finder → **Queue**. Telegram login is required for downloads,
+but not for browsing. Saved songs become playable after Noctis scans the download folder.
+
+Catalog requests and cover images follow Finder's **Proxy** setting and the same system
+proxy/VPN route used by playlist metadata. A failed proxy does not trigger a direct bypass.
+Deezer is tried first; Apple iTunes Search is a metadata fallback when search is unavailable.
+Search/artist metadata is cached for a day, albums for seven days, covers are reused, and a
+saved catalog remains available during network failures. **Refresh catalog** explicitly checks
+for releases again. Rate-limit cooldowns survive restarts. The fallback uses the US storefront
+and has a 200-release cap; regional availability, featured credits and unreleased material
+mean this is not a guaranteed complete discography. Incomplete album results disable the
+album-wide download action. Metadata cannot prove an untagged local recording is explicit.
+API reference: [Apple Search API](https://performance-partners.apple.com/search-api).
+
+The integration changes transient page models, not library files. Catalog-only tracks are
+never inserted into the local library or passed to playback. Turning off **Fill artist and
+album pages from online catalogs** restores local pages. Noctis has no public artist-page
+extension API: future layouts may require an adapter update; unsupported layouts report an
+error and retain the local view. Popular/All Songs lists continue to represent local music.
 
 ## Bring Spotify playlists into Noctis
 

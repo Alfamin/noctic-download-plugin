@@ -3,6 +3,13 @@ using Avalonia.Headless;
 using Avalonia.Themes.Fluent;
 using FreeMusicFinder.Tests;
 
+// Explicit public catalog metadata probe. No Telegram connection, audio download or live library write.
+if (Environment.GetEnvironmentVariable("FMF_DISCOVERY_LIVE") is { Length: > 0 } artists)
+{
+    await LiveDiscoveryTest.RunAsync(artists);
+    return 0;
+}
+
 // Runs every test and prints one line each. The exit code is the number of wrong ones.
 // With FMF_PICTURES set to a folder, the window tests also save pictures of the search window there.
 // With FMF_LIVE_ROUTE set to public Spotify or Deezer links, only LiveRouteTest runs: it reads their
@@ -37,6 +44,8 @@ try
     await QueueManagementTests.RunAsync();
     await BotSelectionTests.RunAsync();
     await SpotifyPlaylistTests.RunAsync();
+    await DiscoveryTests.RunAsync();
+    await DiscoveryNetworkTests.RunAsync();
     await LivePlaylistTest.RunAsync(Environment.GetEnvironmentVariable("FMF_SPOTIFY_PLAYLIST"), Environment.GetEnvironmentVariable("FMF_LIBRARY_SNAPSHOT"), Environment.GetEnvironmentVariable("FMF_LIVE_REPORT"));
 
     var pictures = Environment.GetEnvironmentVariable("FMF_PICTURES");
@@ -47,6 +56,7 @@ try
     WindowTests.Run(string.IsNullOrEmpty(pictures) ? null : pictures);
     PlaylistWindowTests.Run(pictures);
     NativePlaylistTests.Run(Environment.GetEnvironmentVariable("FMF_NOCTIS_APP"));
+    NativeCatalogTests.Run(Environment.GetEnvironmentVariable("FMF_NOCTIS_APP"), pictures);
 }
 catch (Exception ex)
 {

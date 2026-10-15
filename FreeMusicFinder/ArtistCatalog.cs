@@ -1,0 +1,286 @@
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+namespace FreeMusicFinder;
+
+internal sealed record CatalogArtist(string Id, string Name, string Genre = "");
+internal sealed record CatalogRelease(string Id, string Title, CatalogArtist Artist, string Date, string Kind, int Count, bool? Explicit = null, string Artwork = "");
+internal sealed record CatalogSong(string Id, string Title, List<CatalogArtist> Artists, double? Seconds, bool? Explicit, int Disc = 1, int Number = 0)
+{
+    // Apple IDs identify metadata, not a playable/downloadable URL for either bot.
+    public MusicRequest Request => new(Title, string.Join(", ", Artists.Select(a => a.Name)), Seconds,
+        Id.StartsWith("deezer:") ? "https://www.deezer.com/track/" + Id[7..] : null,
+        Explicit, OriginUri: Id.Replace(":", ":track:"));
+}
+internal sealed record CatalogProfile(CatalogArtist Artist, List<CatalogSong> Popular, List<CatalogRelease> Releases, string Notice = "");
+internal sealed record CatalogAlbum(CatalogRelease Release, List<CatalogSong> Songs, string Notice = "");
+internal sealed record CatalogResult<T>(T Value, DateTimeOffset SavedAt, bool Cached, string Warning = "");
+
+/// <summary>Public metadata only. No Telegram, audio, preview URLs, credentials or library writes.
+/// Cache hits work offline; refresh is explicit. Provider IDs never cross catalogs.</summary>
+internal sealed class ArtistCatalog : IDisposable
+{
+    private readonly HttpClient _http;
+    private readonly string _folder;
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly Func<DateTimeOffset> _now;
+    private readonly TimeSpan _applePace;
+    private DateTimeOffset _nextApple;
+    private readonly Dictionary<string, DateTimeOffset> _wait = new();
+    private readonly SemaphoreSlim _artGate = new(2, 2);
+    private sealed record Cache<T>(int Version, DateTimeOffset SavedAt, T Value);
+    private static readonly JsonSerializerOptions Json = new() { MaxDepth = 64 };
+
+    public ArtistCatalog(string folder, HttpMessageHandler? handler = null, Func<DateTimeOffset>? now = null, TimeSpan? applePace = null)
+    {
+        _folder = Path.GetFullPath(folder); _now = now ?? (() => DateTimeOffset.UtcNow);
+        _applePace = applePace ?? TimeSpan.FromSeconds(3.1);
+        _http = new HttpClient(handler ?? PlaylistCatalog.MetadataHandler("")) { Timeout = TimeSpan.FromSeconds(25) };
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("Noctis-FreeMusicFinder/2.8");
+        try
+        {
+            if (SafeFile("limits.json") is {} path && File.Exists(path) && new FileInfo(path).Length < 16384)
+                foreach (var (provider, until) in JsonSerializer.Deserialize<Dictionary<string, DateTimeOffset>>(File.ReadAllText(path)) ?? [])
+                    if (provider is "apple" or "deezer" && until > _now() && until < _now().AddDays(8)) _wait[provider] = until;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException) { }
+    }
+
+    public Task<CatalogResult<List<CatalogArtist>>> SearchAsync(string name, bool refresh, CancellationToken ct)
+    {
+        name = name.Trim();
+        if (name.Length is < 1 or > 200 || name.Any(char.IsControl)) throw new ArgumentException("Enter an artist name (up to 200 characters).");
+        return Cached("search:" + name.ToUpperInvariant(), TimeSpan.FromDays(1), refresh, async () =>
+        {
+            try
+            {
+                using var data = await Get("deezer", "/search/artist?q=" + Uri.EscapeDataString(name) + "&limit=25", ct);
+                var artists = Data(data.RootElement).Select(DeezerArtist).Where(a => a is not null).Cast<CatalogArtist>().DistinctBy(a => a.Id).ToList();
+                if (artists.Count == 0) throw Invalid("Deezer returned no artist matches; trying Apple.");
+                return artists;
+            }
+            catch (Exception ex) when (Recoverable(ex))
+            {
+                using var data = await Get("apple", "/search?entity=musicArtist&media=music&country=US&limit=25&term=" + Uri.EscapeDataString(name), ct);
+                return Results(data.RootElement).Where(a => Text(a, "wrapperType") == "artist").Select(AppleArtist).Where(a => a is not null).Cast<CatalogArtist>().DistinctBy(a => a.Id).ToList();
+            }
+        }, ct);
+    }
+
+    public Task<CatalogResult<CatalogProfile>> ArtistAsync(CatalogArtist artist, bool refresh, CancellationToken ct)
+    {
+        var (provider, id) = Split(artist.Id);
+        return Cached("artist:" + artist.Id, TimeSpan.FromDays(1), refresh, async () =>
+        {
+            CatalogProfile value;
+            if (provider == "deezer")
+            {
+                using var detail = await Get(provider, "/artist/" + id, ct);
+                var actual = DeezerArtist(detail.RootElement);
+                if (actual?.Id != artist.Id) throw Invalid("Artist identity did not match the requested profile.");
+                using var popular = await Get(provider, "/artist/" + id + "/top?limit=10", ct);
+                var releases = (await Pages("/artist/" + id + "/albums?limit=100", ct)).Select(a => DeezerRelease(a, actual)).Where(a => a is not null).Cast<CatalogRelease>().ToList();
+                value = new(actual, Data(popular.RootElement).Select(t => DeezerSong(t)).Where(t => t is not null).Cast<CatalogSong>().ToList(), releases);
+            }
+            else
+            {
+                using var releases = await Get(provider, "/lookup?id=" + id + "&entity=album&limit=200&country=US", ct);
+                var all = Results(releases.RootElement).ToArray();
+                var actual = all.Where(a => Text(a, "wrapperType") == "artist").Select(AppleArtist).FirstOrDefault(a => a?.Id == artist.Id);
+                if (actual is null) throw Invalid("The artist is unavailable in Apple's US catalog.");
+                using var popular = await Get(provider, "/lookup?id=" + id + "&entity=song&limit=10&country=US", ct);
+                var albums = all.Where(a => Text(a, "wrapperType") == "collection").Select(AppleRelease).Where(a => a is not null).Cast<CatalogRelease>().ToList();
+                value = new(actual, Results(popular.RootElement).Select(AppleSong).Where(t => t is not null).Cast<CatalogSong>().ToList(), albums,
+                    "Apple US catalog · popular songs use catalog order. Regional availability and provider limits mean this is not a guaranteed complete discography." + (albums.Count >= 200 ? " The 200-release limit was reached." : ""));
+            }
+            // Refresh adds/updates metadata without deleting previously seen releases, even if a store removes one.
+            var old = Read<CatalogProfile>("artist:" + artist.Id);
+            value = value with { Releases = value.Releases.Concat(old?.Value.Releases ?? []).DistinctBy(a => a.Id).OrderByDescending(a => a.Date, StringComparer.Ordinal).ToList() };
+            return value;
+        }, ct);
+    }
+
+    public Task<CatalogResult<CatalogAlbum>> AlbumAsync(CatalogRelease album, bool refresh, CancellationToken ct)
+    {
+        var (provider, id) = Split(album.Id);
+        return Cached("album:" + album.Id, TimeSpan.FromDays(7), refresh, async () =>
+        {
+            if (provider == "deezer")
+            {
+                using var data = await Get(provider, "/album/" + id, ct);
+                var actual = DeezerRelease(data.RootElement, album.Artist);
+                if (actual?.Id != album.Id) throw Invalid("Album identity did not match the requested release.");
+                var tracks = await Pages("/album/" + id + "/tracks?limit=100", ct);
+                var songs = tracks.Select(t => DeezerSong(t)).Where(t => t is not null).Cast<CatalogSong>().ToList();
+                return new CatalogAlbum(actual, songs, actual.Count > 0 && actual.Count != songs.Count ? "The catalog returned only part of this album. Download all is unavailable; individual songs can still be selected." : "");
+            }
+            using var result = await Get(provider, "/lookup?id=" + id + "&entity=song&limit=200&country=US", ct);
+            var items = Results(result.RootElement).ToArray();
+            var release = items.Where(a => Text(a, "wrapperType") == "collection").Select(AppleRelease).FirstOrDefault(a => a?.Id == album.Id);
+            if (release is null) throw Invalid("The album is unavailable in Apple's US catalog.");
+            var rows = items.Where(t => Id(t, "collectionId", "apple") == album.Id).Select(AppleSong).Where(t => t is not null).Cast<CatalogSong>().OrderBy(t => t.Disc).ThenBy(t => t.Number).ToList();
+            return new CatalogAlbum(release, rows, release.Count > 0 && release.Count != rows.Count ? "The catalog's track count differs from the returned songs (some entries may be unavailable or non-audio). Download all is unavailable." : "");
+        }, ct);
+    }
+
+    private async Task<CatalogResult<T>> Cached<T>(string key, TimeSpan age, bool refresh, Func<Task<T>> fetch, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var old = Read<T>(key);
+            if (!refresh && old is not null && _now() - old.SavedAt < age) return new(old.Value, old.SavedAt, true);
+            try
+            {
+                var value = await fetch().ConfigureAwait(false); ct.ThrowIfCancellationRequested();
+                var saved = new Cache<T>(1, _now(), value); var warning = "";
+                try { AtomicJson.Write(SafeFile(Key(key))!, saved); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+                { warning = "CATALOG_CACHE_SAVE_FAILED: Results are available, but could not be saved for offline use."; }
+                return new(value, saved.SavedAt, false, warning);
+            }
+            catch (Exception ex) when (old is not null && Recoverable(ex))
+            { return new(old.Value, old.SavedAt, true, "Showing saved metadata. " + Explain(ex)); }
+        }
+        finally { _gate.Release(); }
+    }
+    private Cache<T>? Read<T>(string key)
+    {
+        try
+        {
+            var path = SafeFile(Key(key))!;
+            if (!File.Exists(path) || new FileInfo(path).Length > 4 * 1024 * 1024) return null;
+            var data = JsonSerializer.Deserialize<Cache<T>>(File.ReadAllText(path), Json);
+            return data is { Version: 1, Value: not null } && data.SavedAt <= _now().AddMinutes(5) ? data : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException) { return null; }
+    }
+    private static string Key(string key) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))).ToLowerInvariant() + ".json";
+    private string? SafeFile(string name)
+    {
+        if (Directory.Exists(_folder) && (File.GetAttributes(_folder) & FileAttributes.ReparsePoint) != 0) throw new InvalidDataException("CATALOG_CACHE_UNSAFE: the metadata folder is redirected.");
+        var path = Path.Combine(_folder, name);
+        if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new InvalidDataException("CATALOG_CACHE_UNSAFE: the metadata file is redirected.");
+        return path;
+    }
+    private async Task<List<JsonElement>> Pages(string first, CancellationToken ct)
+    {
+        var output = new List<JsonElement>(); var path = first; var seen = new HashSet<string>();
+        for (var count = 0; count < 100; count++)
+        {
+            if (!seen.Add(path)) throw Invalid("The catalog repeated a page; no incomplete list was saved.");
+            using var data = await Get("deezer", path, ct);
+            var rows = Data(data.RootElement).ToArray(); output.AddRange(rows.Select(a => a.Clone()));
+            var next = Text(data.RootElement, "next");
+            if (next.Length == 0)
+            {
+                if (Number(data.RootElement, "total") is > 0 and var total && total != output.Count) throw Invalid("The catalog returned an incomplete list.");
+                return output;
+            }
+            if (rows.Length == 0 || output.Count > 10000 || !Uri.TryCreate(next, UriKind.Absolute, out var uri) || uri.Host != "api.deezer.com" || uri.UserInfo.Length > 0 || !uri.IsDefaultPort || uri.AbsolutePath != first.Split('?')[0]) throw Invalid("The catalog returned an unsafe or incomplete next page.");
+            path = uri.PathAndQuery;
+        }
+        throw Invalid("The catalog exceeded its page limit; no truncated list was saved.");
+    }
+    private async Task<JsonDocument> Get(string provider, string path, CancellationToken ct)
+    {
+        if (_wait.TryGetValue(provider, out var until) && until > _now()) throw new SourcesWaitingException(provider + " catalog is waiting until " + until.ToLocalTime().ToString("g") + ". Cached results remain available.", until);
+        if (provider == "apple")
+        {
+            var delay = _nextApple - _now(); if (delay > TimeSpan.Zero) await Task.Delay(delay, ct).ConfigureAwait(false);
+            _nextApple = _now() + _applePace;
+        }
+        var url = (provider == "apple" ? "https://itunes.apple.com" : "https://api.deezer.com") + path;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(25));
+        try
+        {
+            using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
+            if (response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.Forbidden)
+            {
+                var retry = response.Headers.RetryAfter?.Date ?? _now().Add(response.Headers.RetryAfter?.Delta ?? TimeSpan.FromMinutes(30));
+                retry = retry < _now().AddSeconds(3) ? _now().AddSeconds(3) : retry > _now().AddDays(7) ? _now().AddDays(7) : retry;
+                _wait[provider] = retry;
+                try { AtomicJson.Write(SafeFile("limits.json")!, _wait); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException) { }
+                throw new SourcesWaitingException($"CATALOG_HTTP_{(int)response.StatusCode}: {provider} refused or limited this connection. Check your VPN/proxy or retry later.", retry);
+            }
+            if (!response.IsSuccessStatusCode) throw new HttpRequestException($"CATALOG_HTTP_{(int)response.StatusCode}: {provider} catalog could not be read. Check connectivity and retry.");
+            if (response.Content.Headers.ContentLength > 4 * 1024 * 1024) throw Invalid("Catalog response exceeded 4 MB.");
+            await using var input = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
+            using var buffer = new MemoryStream(); var bytes = new byte[16384];
+            while (true) { var n = await input.ReadAsync(bytes, timeout.Token).ConfigureAwait(false); if (n == 0) break; if (buffer.Length + n > 4 * 1024 * 1024) throw Invalid("Catalog response exceeded 4 MB."); buffer.Write(bytes, 0, n); }
+            var data = JsonDocument.Parse(buffer.ToArray(), new JsonDocumentOptions { MaxDepth = 64 });
+            if (data.RootElement.ValueKind != JsonValueKind.Object || data.RootElement.TryGetProperty("error", out _)) { data.Dispose(); throw Invalid(provider + " returned a catalog error. The artist or release may be unavailable."); }
+            return data;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new TimeoutException("CATALOG_TIMEOUT: " + provider + " did not finish its response in 25 seconds. Check your VPN/proxy and retry."); }
+        catch (JsonException ex) { throw new InvalidDataException("CATALOG_FORMAT_CHANGED: The service returned an unsupported response.", ex); }
+    }
+    private static (string Provider, string Id) Split(string value)
+    {
+        var parts = value.Split(':');
+        if (parts.Length != 2 || parts[0] is not ("apple" or "deezer") || !long.TryParse(parts[1], out var id) || id <= 0 || parts[1] != id.ToString(System.Globalization.CultureInfo.InvariantCulture)) throw Invalid("Invalid catalog identity.");
+        return (parts[0], parts[1]);
+    }
+    private static InvalidDataException Invalid(string message) => new("CATALOG_INCOMPLETE: " + message);
+    private static bool Recoverable(Exception ex) => ex is HttpRequestException or IOException or TimeoutException or SourcesWaitingException or JsonException;
+    internal static string Explain(Exception ex) => ex is SourcesWaitingException wait ? wait.Message + " Retry after " + wait.Until.ToLocalTime().ToString("g") + "." : ex.Message;
+    private static string Text(JsonElement value, string key) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out var item) && item.ValueKind == JsonValueKind.String ? Clean(item.GetString() ?? "") : "";
+    private static string Clean(string value) => new(value.Where(c => !char.IsControl(c)).Take(1000).ToArray());
+    private static long Number(JsonElement value, string key) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out var item) && item.ValueKind == JsonValueKind.Number && item.TryGetInt64(out var n) ? n : 0;
+    private static string? Id(JsonElement value, string key, string provider) => Number(value, key) is > 0 and var n ? provider + ":" + n : null;
+    private static IEnumerable<JsonElement> Data(JsonElement root) => root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array ? data.EnumerateArray().ToArray() : throw Invalid("The catalog's page has no result list.");
+    private static IEnumerable<JsonElement> Results(JsonElement root) => root.TryGetProperty("results", out var data) && data.ValueKind == JsonValueKind.Array ? data.EnumerateArray().ToArray() : throw Invalid("Apple returned no result list.");
+    private static CatalogArtist? DeezerArtist(JsonElement a) => Id(a, "id", "deezer") is {} id && Text(a, "name") is { Length: > 0 } name ? new(id, name) : null;
+    private static CatalogArtist? AppleArtist(JsonElement a) => Id(a, "artistId", "apple") is {} id && Text(a, "artistName") is { Length: > 0 } name ? new(id, name, Text(a, "primaryGenreName")) : null;
+    private static CatalogRelease? DeezerRelease(JsonElement a, CatalogArtist fallback)
+    {
+        var artist = a.TryGetProperty("artist", out var by) ? DeezerArtist(by) ?? fallback : fallback;
+        return Id(a, "id", "deezer") is {} id && Text(a, "title") is { Length: > 0 } title ? new(id, title, artist, Text(a, "release_date"), Text(a, "record_type"), (int)Math.Clamp(Number(a, "nb_tracks"), 0, 10000), Flag(a, "explicit_lyrics"), Text(a, "cover_medium")) : null;
+    }
+    private static CatalogRelease? AppleRelease(JsonElement a) => Id(a, "collectionId", "apple") is {} id && Text(a, "collectionName") is { Length: > 0 } name && AppleArtist(a) is {} artist
+        ? new(id, name, artist, Text(a, "releaseDate").Split('T')[0], name.EndsWith(" - Single", StringComparison.OrdinalIgnoreCase) ? "single" : name.EndsWith(" - EP", StringComparison.OrdinalIgnoreCase) ? "ep" : "album", (int)Math.Clamp(Number(a, "trackCount"), 0, 10000), Explicit(a, "collectionExplicitness"), Text(a, "artworkUrl100")) : null;
+    private static bool? Flag(JsonElement a, string key) => a.TryGetProperty(key, out var flag) && flag.ValueKind is JsonValueKind.True or JsonValueKind.False ? flag.GetBoolean() : null;
+    private static bool? Explicit(JsonElement a, string key) => Text(a, key) switch { "explicit" => true, "cleaned" => false, _ => null };
+    private static CatalogSong? DeezerSong(JsonElement t)
+    {
+        var artists = t.TryGetProperty("contributors", out var cs) && cs.ValueKind == JsonValueKind.Array ? cs.EnumerateArray().Select(DeezerArtist).Where(a => a is not null).Cast<CatalogArtist>().DistinctBy(a => a.Id).ToList() : [];
+        if (artists.Count == 0 && t.TryGetProperty("artist", out var by) && DeezerArtist(by) is {} artist) artists.Add(artist);
+        return Id(t, "id", "deezer") is {} id && Text(t, "title") is { Length: > 0 } title && artists.Count > 0 ? new(id, title, artists, Duration(Number(t, "duration")), Flag(t, "explicit_lyrics"), (int)Math.Clamp(Number(t, "disk_number"), 1, 100), (int)Math.Clamp(Number(t, "track_position"), 0, 10000)) : null;
+    }
+    private static CatalogSong? AppleSong(JsonElement t) => Text(t, "kind") == "song" && Id(t, "trackId", "apple") is {} id && Text(t, "trackName") is { Length: > 0 } title && AppleArtist(t) is {} artist
+        ? new(id, title, [artist], Duration(Number(t, "trackTimeMillis") / 1000d), Explicit(t, "trackExplicitness"), (int)Math.Clamp(Number(t, "discNumber"), 1, 100), (int)Math.Clamp(Number(t, "trackNumber"), 0, 10000)) : null;
+    private static double? Duration(double seconds) => seconds is > 0 and <= 86400 ? seconds : null;
+    internal static bool ArtworkUrl(string? value) => Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme == "https" && uri.IsDefaultPort && uri.UserInfo.Length == 0 &&
+        (uri.Host == "cdn-images.dzcdn.net" || System.Text.RegularExpressions.Regex.IsMatch(uri.Host, @"^is[1-9][0-9]?-ssl\.mzstatic\.com$"));
+    public string? SavedArtwork(string? url)
+    {
+        if (!ArtworkUrl(url)) return null;
+        try { var path = SafeFile("art-" + Key(url!)[..64] + ".img")!; return File.Exists(path) && new FileInfo(path).Length is > 0 and <= 512 * 1024 ? path : null; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException) { return null; }
+    }
+    public async Task<string?> ArtworkAsync(string url, CancellationToken ct)
+    {
+        if (!ArtworkUrl(url)) return null;
+        await _artGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (SavedArtwork(url) is {} saved) return saved;
+            var path = SafeFile("art-" + Key(url)[..64] + ".img")!;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(25));
+            using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > 512 * 1024 || response.Content.Headers.ContentType?.MediaType is not ("image/jpeg" or "image/png" or "image/webp")) return null;
+            await using var input = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false); using var data = new MemoryStream(); var bytes = new byte[16384];
+            while (true) { var n = await input.ReadAsync(bytes, timeout.Token).ConfigureAwait(false); if (n == 0) break; if (data.Length + n > 512 * 1024) return null; data.Write(bytes, 0, n); }
+            if (data.Length == 0) return null;
+            Directory.CreateDirectory(_folder); var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try { await using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { data.Position = 0; await data.CopyToAsync(output, timeout.Token).ConfigureAwait(false); } File.Move(temp, path, overwrite: false); }
+            catch (IOException) when (File.Exists(path)) { }
+            finally { if (File.Exists(temp)) File.Delete(temp); }
+            return SavedArtwork(url);
+        }
+        finally { _artGate.Release(); }
+    }
+    public void Dispose() => _http.Dispose();
+}

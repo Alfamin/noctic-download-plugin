@@ -31,10 +31,17 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     private SpotifyPlaylists? _playlists;
     private Downloads? _downloads;
     private SearchWindow? _window;
+    private ArtistCatalog? _catalog;
+    private DiscoveryActions? _discoveryActions;
+    private NativeCatalogPages? _artistPages;
     private KeyGesture? _shortcut;
     // Read on the threads that connect to Telegram; settings themselves are only read on the UI thread.
     private volatile string _proxy = "";
     private volatile bool _allowMp3 = true;
+    private readonly Func<string, string, ArtistCatalog> _catalogFactory;
+
+    public FreeMusicPlugin() : this((folder, proxy) => new ArtistCatalog(folder, PlaylistCatalog.MetadataHandler(proxy))) { }
+    internal FreeMusicPlugin(Func<string, string, ArtistCatalog> catalogFactory) => _catalogFactory = catalogFactory;
 
     public PluginInfo Info { get; } = new(
         Id: "dev.moshi.freemusicfinder",
@@ -57,6 +64,10 @@ public sealed class FreeMusicPlugin : INoctisPlugin
             new PlaylistCatalog(PlaylistCatalog.MetadataHandler(_proxy,Log)));
         _playlists = new SpotifyPlaylists(Path.Combine(host.DataDirectory, "spotify-playlists.json"), new PlaylistLibrary(), _downloads, _bot.Track,
             new PlaylistCatalog(PlaylistCatalog.MetadataHandler(_proxy, Log)));
+        _catalog = CreateCatalog();
+        _discoveryActions = new DiscoveryActions(new PlaylistLibrary(), _downloads, _bot.Track,
+            () => Downloader.Folder(host.Settings.GetString(DownloadFolderKey), host.DataDirectory), () => _telegram?.IsLoggedIn == true);
+        _artistPages = new NativeCatalogPages(() => _catalog!, _discoveryActions, Log, () => _host?.Settings.GetBool("artistCatalogOnPages", true) == true, choicesPath: Path.Combine(host.DataDirectory, "artist-catalog", "artist-choices.json"));
         _transfers.Changed += Announce;
         _downloads.Finished += Announce;
 
@@ -64,7 +75,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
             "Find more by this artist…",
             // A 24×24 SVG path: a magnifying glass.
             "M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z",
-            (Action<TrackInfo>)(track => ShowWindow(track.Artist))));
+            (Action<TrackInfo>)(track => ShowWindow(track.Artist, discover: true))));
 
         host.Settings.Changed += OnSettingChanged;
 
@@ -93,6 +104,9 @@ public sealed class FreeMusicPlugin : INoctisPlugin
 
         _window?.Close();
         _window = null;
+        _artistPages?.Dispose(); _artistPages = null;
+        _catalog?.Dispose(); _catalog = null;
+        _discoveryActions = null;
         _playlists?.Dispose(); _playlists = null;
         if (_downloads is not null) _downloads.Finished -= Announce;
         _downloads?.Dispose();
@@ -116,6 +130,8 @@ public sealed class FreeMusicPlugin : INoctisPlugin
             catch (FormatException ex) { Announce("Free Music Finder: " + ex.Message); }
             try{_transfers?.UpdateProxy(_proxy,Log);}catch(Exception ex){Announce("Metadata proxy: "+ex.Message);}
             UpdatePlaylistProxy();
+            _catalog?.Dispose();
+            _catalog = CreateCatalog();
         }
         else if (key == ShortcutKey) ApplyShortcut();
         else if (key == AllowMp3Key) _allowMp3 = _host?.Settings.GetBool(AllowMp3Key, true) ?? true;
@@ -143,14 +159,17 @@ public sealed class FreeMusicPlugin : INoctisPlugin
         ShowWindow(null);
     }
 
-    private void ShowWindow(string? query)
+    private ArtistCatalog CreateCatalog() => _catalogFactory(Path.Combine(_host!.DataDirectory, "artist-catalog"), _proxy);
+    private DiscoveryView CreateDiscovery() => new(() => _catalog ?? throw new InvalidOperationException("Free Music Finder has stopped."), artist => { _artistPages!.OpenArtist(artist); _window?.Close(); });
+
+    private void ShowWindow(string? query, bool discover = false)
     {
         if (_host is null || _telegram is null || _bot is null || _downloads is null) return;
         try
         {
             if (_window is null)
             {
-                _window = new SearchWindow(_host, _telegram, _downloads, _bot.SearchAsync,_transfers,_playlists);
+                _window = new SearchWindow(_host, _telegram, _downloads, _bot.SearchAsync,_transfers,_playlists, CreateDiscovery());
                 _window.Closed += (_, _) => _window = null;
 
                 var owner = (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.MainWindow;
@@ -163,7 +182,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
                 _window.Activate();
             }
 
-            if (!string.IsNullOrWhiteSpace(query)) _window.Search(query);
+            if (!string.IsNullOrWhiteSpace(query)) { if (discover) _window.BrowseArtist(query); else _window.Search(query); }
             else _window.FocusSearchBox();
         }
         catch (Exception ex)
