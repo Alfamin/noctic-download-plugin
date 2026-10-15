@@ -30,7 +30,7 @@ internal static class NativeCatalogTests
         Check.True(AlbumNavigation(app.GetType("Noctis.ViewModels.MainWindowViewModel", true)!, albumType).IsPublic, "album navigation resolves the installed host's public method and optional arguments");
         var track = Activator.CreateInstance(trackType)!; var path = Path.Combine(folder, "Owned.flac"); File.WriteAllText(path, "Synthetic test marker");
         Set(track, "Id", Guid.NewGuid()); Set(track, "Title", "Owned"); Set(track, "Artist", "North Star"); Set(track, "AlbumArtist", "North Star"); Set(track, "Album", "Orbit"); Set(track, "FilePath", path); Set(track, "Duration", TimeSpan.FromSeconds(180)); Set(track, "TrackNumber", 1); Set(track, "TrackCount", 3);
-        var localAlbum = Activator.CreateInstance(albumType)!; Set(localAlbum, "Id", Guid.NewGuid()); Set(localAlbum, "Name", "Orbit"); Set(localAlbum, "Artist", "North Star"); Set(localAlbum, "Year", 2026); Set(localAlbum, "TrackCount", 1); Set(localAlbum, "Tracks", List(trackType, [track])); Set(track, "AlbumId", Get(localAlbum, "Id"));
+        var localAlbum = Activator.CreateInstance(albumType)!; Set(localAlbum, "Id", Guid.NewGuid()); Set(localAlbum, "Name", "Orbit (Int'l Version)"); Set(localAlbum, "Artist", "North Star"); Set(localAlbum, "Year", 2026); Set(localAlbum, "TrackCount", 1); Set(localAlbum, "Tracks", List(trackType, [track])); Set(track, "AlbumId", Get(localAlbum, "Id"));
         var originalTracks = List(trackType, [track]); var originalAlbums = List(albumType, [localAlbum]);
         var libraryType = core.GetType("Noctis.Services.ILibraryService", true)!;
         var library = DispatchProxy.Create(libraryType, typeof(NativePlaylistTests.Stub));
@@ -52,8 +52,10 @@ internal static class NativeCatalogTests
         using var catalog = DiscoveryTests.Catalog(Path.Combine(folder, "catalog"), new DiscoveryTests.Http());
         var profile = Finish(catalog.ArtistAsync(DiscoveryTests.Star, false, default)).Value;
         var metadata = Finish(catalog.AlbumAsync(DiscoveryTests.Orbit, false, default)).Value;
-        var tiles = ApplyArtist(artistVm, profile);
-        Check.Equal(2, tiles.Count, "catalog albums and singles added to the native artist model");
+        var duplicateProfile = profile with { Releases = profile.Releases.Append(profile.Releases.First(r => r.Kind == "album") with { Id = "deezer:555", Explicit = false }).ToList() };
+        var tiles = ApplyArtist(artistVm, duplicateProfile);
+        Check.Equal(2, tiles.Count, "native artist merges clean/explicit catalog duplicates into one tile per edition");
+        Check.Equal(2, Values(Get(artistVm, "Releases")).Count, "local Int'l tag does not add an extra one-track album tile");
         Check.Equal(1, (int)Get(artistVm, "AlbumCount")!, "native Albums section uses catalog release type");
         Check.Equal(1, (int)Get(artistVm, "SingleCount")!, "native Singles & EPs section is filled, including missing releases");
         Check.Equal(1, originalAlbums.Count, "global library album list is unchanged");
@@ -83,6 +85,8 @@ internal static class NativeCatalogTests
         using var downloads = new Downloads(_ => { }); downloads.SetPaused(true);
         var actions = new DiscoveryActions(isolated, downloads, Track, () => Path.Combine(folder, "saved"), () => loggedIn);
         var shell = new Shell(library, player);
+        var pageAlbum = AlbumForPage(shell, tiles.First(t => t.Value.Kind == "album").Key, metadata with { Songs = metadata.Songs.Skip(1).ToList() }, Finish(actions.MatchAsync(metadata.Songs, default)));
+        Check.True(Values(Get(pageAlbum, "Tracks")).Contains(track), "opening a merged catalog tile preserves local edition tracks absent from provider listing");
         var previous = CatalogAlbumLibrary.Attach(albumVm);
         Check.True(ReferenceEquals(previous, library), "album-only library overlay retains the original service");
         using var rows = new NativeAlbumRows(shell, albumVm, metadata, actions, list.ItemTemplate, _ => { });
@@ -166,13 +170,24 @@ internal static class NativeCatalogTests
 
         shell.CurrentView = albumVm; lifecycleWindow.Content = albumView; Dispatcher.UIThread.RunJobs(); pages.Scan();
         Check.Until(() => albumView.GetVisualDescendants().OfType<NativeAlbumRows>().Any(), "adapter enriches an already open local album");
+        Check.Until(() => Get(albumVm, "HeaderArtPath") is string cover && File.Exists(cover), "native album header receives the actual cached catalog artwork binding");
+        var headerArt = Get(albumVm, "HeaderArtPath") as string;
+        Check.True((bool)Get(albumVm, "CanViewArtwork")!, "native artwork viewer is enabled for the catalog cover");
+        Check.Until(() => albumView.GetVisualDescendants().OfType<Control>().Any(c => c.GetType().Name == "CachedImage" && Equals(Get(c, "SourcePath"), headerArt) && c.IsVisible), "native cover image control receives the catalog artwork path");
+        using (var decoded = new Avalonia.Media.Imaging.Bitmap(headerArt!)) Check.True(decoded.PixelSize.Width > 0, "cached cover decodes through Noctis's native image backend");
+        albumVmType.GetMethod("RefreshFromLibrary", Private)!.Invoke(albumVm, null); pages.Scan();
+        Check.Equal(headerArt, Get(albumVm, "HeaderArtPath") as string, "native rescan restores the same cover from cache instead of leaving Album placeholder");
+        var customArt = Path.Combine(folder, "custom-cover.png"); File.WriteAllBytes(customArt, DiscoveryTests.Cover); Set(albumVm, "HeaderArtPath", customArt); pages.Scan();
+        Check.Equal(customArt, Get(albumVm, "HeaderArtPath") as string, "catalog respects an existing native or user-selected cover"); headerArt = customArt;
         var backAlbum = (UserControl)Activator.CreateInstance(albumView.GetType())!; backAlbum.DataContext = albumVm; lifecycleWindow.Content = backAlbum;
         Dispatcher.UIThread.RunJobs(); pages.Scan();
         Check.Until(() => backAlbum.GetVisualDescendants().OfType<NativeAlbumRows>().Any(r => r.GetVisualDescendants().OfType<TextBlock>().Any(t => t.Text == "Missing")), "Back recreates the full native album rows in the new view");
+        Check.Equal(headerArt, Get(albumVm, "HeaderArtPath") as string, "album cover survives Back navigation");
         enabled = false; pages.Scan(); Dispatcher.UIThread.RunJobs();
         Check.True(!backAlbum.GetVisualDescendants().OfType<NativeAlbumRows>().Any(), "disabling catalog restores the original native album template");
         Check.True(ReferenceEquals(albumVmType.GetField("_library", Private)!.GetValue(albumVm), library) && ReferenceEquals(Get(albumVm, "Album"), localAlbum), "disabling restores the original album and library service");
         Check.Equal(1, Values(Get(albumVm, "Tracks")).Count, "disabling retains the original local playback list");
+        Check.True(Get(albumVm, "HeaderArtPath") is null, "disabling restores the original native header artwork field");
         Check.Equal(originalSingleCount, (int)Get(artistVm, "SingleCount")!, "disabling returns artist sections to original local data");
         Check.True(logs.Count == 0, "native lifecycle has no unsupported-host or restoration errors");
         enabled = true; isolated.ReadError = new IOException("Synthetic library scan unavailable"); pages.Scan();

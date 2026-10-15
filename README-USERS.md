@@ -15,6 +15,10 @@ play normally; missing songs show **Download now** and **Queue download**. Ctrl+
 missing rows, then **Queue N downloads**, or use **Download all missing…** and confirm.
 There are no selection checkboxes. Browsing never starts an audio download.
 
+**2.8.1 fixes:** equivalent clean/explicit and international copies share one tile, preferring
+the explicit version. Deluxe and other distinct editions stay separate. Existing international
+album tags open the full catalog listing, and album header covers now load and survive rescans.
+
 For an artist outside your library: Finder → **Artists** → search → **Open in Noctis**.
 If several artists share the same name, pick the right genre/identity once. Download progress
 is in Finder → **Queue**. Noctis must scan downloaded songs before they become playable.

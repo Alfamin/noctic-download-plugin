@@ -57,6 +57,9 @@ internal sealed class NativeCatalogPages : IDisposable
         public UserControl Page = page; public ItemsControl List = list;
         public object? OriginalItems = list.ItemsSource; public IDataTemplate? OriginalTemplate = list.ItemTemplate;
         public IReadOnlyList<object> OriginalTracks = Values(Get(vm, "Tracks"));
+        public string? OriginalHeaderArt = Get(vm, "HeaderArtPath") as string, CoverPath;
+        public bool LoadingCover;
+        public DateTimeOffset CoverRetry;
         public CatalogAlbum Metadata = metadata; public NativeAlbumRows? Rows;
     }
     public NativeCatalogPages(Func<ArtistCatalog> catalog, DiscoveryActions actions, Action<string> log, Func<bool> enabled, Func<object?>? main = null, string? choicesPath = null, Func<Window?>? window = null)
@@ -112,7 +115,7 @@ internal sealed class NativeCatalogPages : IDisposable
                 }
                 else if (page.GetType().FullName == "Noctis.Views.AlbumDetailView")
                 {
-                    if (_albums.TryGetValue(vm, out var album)) { if (!ReferenceEquals(album.Page, page)) ReattachAlbum(album, page); }
+                    if (_albums.TryGetValue(vm, out var album)) { if (!ReferenceEquals(album.Page, page)) ReattachAlbum(album, page); EnsureAlbumArtwork(album); }
                     else if (!_albumNotices.ContainsKey(vm) && _pending.Add(vm)) _ = LoadAlbum(page, vm);
                     else if (_albumNotices.TryGetValue(vm, out var notice) && !ReferenceEquals(notice.Page, page))
                     {
@@ -232,7 +235,7 @@ internal sealed class NativeCatalogPages : IDisposable
     {
         if (_main() is not {} main || !_tiles.TryGetValue(tile, out var release)) return false;
         var library = main.GetType().GetField("_library", Private)?.GetValue(main);
-        var owned = library is null ? null : Values(Get(library, "Albums")).FirstOrDefault(a => BotText.Key(Get(a, "Name") as string) == BotText.Key(release.Title) && BotText.Key(Get(a, "Artist") as string) == BotText.Key(release.Artist.Name));
+        var owned = library is null ? null : Values(Get(library, "Albums")).FirstOrDefault(a => CatalogEditions.Matches(release, Get(a, "Name") as string ?? "", Get(a, "Artist") as string ?? ""));
         if (owned is null) return false;
         var button = source.GetVisualAncestors().Prepend(source).OfType<Button>().FirstOrDefault(b => b.Classes.Contains("album-tile") && ReferenceEquals(b.DataContext, tile));
         if (button is null) return false;
@@ -290,7 +293,7 @@ internal sealed class NativeCatalogPages : IDisposable
                 var identity = await ResolveArtist(Get(album, "Artist") as string ?? "", notice, _stop.Token, chosen => { _ = LoadAlbum(page, vm); });
                 if (identity is null) { status.Text = "Choose the correct catalog artist once:"; return; }
                 var profile = await _catalog().ArtistAsync(identity!, false, _stop.Token);
-                var release = profile.Value.Releases.Where(r => BotText.Key(r.Title) == BotText.Key(Get(album, "Name") as string)).OrderByDescending(r => r.Explicit == true).FirstOrDefault();
+                var release = profile.Value.Releases.FirstOrDefault(r => CatalogEditions.Matches(r, Get(album, "Name") as string ?? "", Get(album, "Artist") as string ?? ""));
                 if (release is null) { status.Text = "This release was not found in the online catalog. Your local tracks are shown."; return; }
                 metadata = (await _catalog().AlbumAsync(release, false, _stop.Token)).Value;
             }
@@ -304,6 +307,7 @@ internal sealed class NativeCatalogPages : IDisposable
             list.ItemTemplate = new FuncDataTemplate<object>((_, _) => rows); list.ItemsSource = new object[] { metadata };
             await rows.RefreshAsync(requireSuccess: true);
             if (_disposed || !_enabled() || !_albums.ContainsKey(vm)) return;
+            EnsureAlbumArtwork(state);
             _opened.Remove(vm); _albumNotices.Remove(vm); if (notice.Parent is Panel parent) parent.Children.Remove(notice);
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
@@ -332,6 +336,28 @@ internal sealed class NativeCatalogPages : IDisposable
         catch (OperationCanceledException) { }
         catch (Exception) { /* Optional cover art keeps the native placeholder on a network/cache error. */ }
     }
+    private void EnsureAlbumArtwork(AlbumState state)
+    {
+        // A native library refresh resets HeaderArtPath to its persistence folder. The
+        // catalog cover remains in our cache, so restore that view binding without refetching.
+        var native = Get(state.Vm, "HeaderArtPath") as string;
+        var path = !string.IsNullOrWhiteSpace(native) && File.Exists(native) ? native : state.CoverPath ?? state.OriginalHeaderArt ?? Get(Get(state.Vm, "Album")!, "ArtworkPath") as string;
+        if (AlbumArtwork(state.Vm, path)) { state.CoverPath = path; return; }
+        if (state.LoadingCover || DateTimeOffset.UtcNow < state.CoverRetry || !ArtistCatalog.ArtworkUrl(state.Metadata.Release.Artwork)) return;
+        state.LoadingCover = true; _ = LoadAlbumArtwork(state);
+    }
+    private async Task LoadAlbumArtwork(AlbumState state)
+    {
+        try
+        {
+            var path = await _catalog().ArtworkAsync(state.Metadata.Release.Artwork, _stop.Token);
+            if (_disposed || !_enabled() || !_albums.TryGetValue(state.Vm, out var active) || !ReferenceEquals(active, state)) return;
+            if (AlbumArtwork(state.Vm, path)) state.CoverPath = path;
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception) { /* A failed optional cover never replaces usable local artwork or blocks songs. */ }
+        finally { state.LoadingCover = false; state.CoverRetry = DateTimeOffset.UtcNow.AddMinutes(1); }
+    }
     public void Dispose()
     {
         if (_disposed) return; _disposed = true; _stop.Cancel(); _openStop?.Cancel(); _timer.Stop(); _clickGuard.Dispose(); _contextGuard.Dispose(); RestorePages();
@@ -355,6 +381,7 @@ internal sealed class NativeCatalogPages : IDisposable
         try
         {
             state.Vm.GetType().GetField("_library", Private)!.SetValue(state.Vm, state.OriginalLibrary); Set(state.Vm, "Album", state.OriginalAlbum);
+            Set(state.Vm, "HeaderArtPath", state.OriginalHeaderArt);
             var tracks = Get(state.Vm, "Tracks")!; var type = state.OriginalAlbum.GetType().GetProperty("Tracks")!.PropertyType.GenericTypeArguments.Single();
             tracks.GetType().GetMethod("ReplaceAll")!.Invoke(tracks, [List(type, state.OriginalTracks)]);
             state.Vm.GetType().GetMethod("BuildDiscGroups", Private)!.Invoke(state.Vm, null);

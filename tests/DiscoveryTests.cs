@@ -17,6 +17,11 @@ internal static class DiscoveryTests
             lock (Calls) Calls.Add(request.RequestUri!); ct.ThrowIfCancellationRequested();
             if (Override is {} replace) return replace(request, ct);
             if (Offline) throw new HttpRequestException("Synthetic offline connection");
+            if (ArtistCatalog.ArtworkUrl(request.RequestUri?.AbsoluteUri))
+            {
+                var content = new ByteArrayContent(Cover); content.Headers.ContentType = new("image/png");
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+            }
             var uri = request.RequestUri!; var path = uri.AbsolutePath; var query = uri.Query;
             if (Limited || AppleOnly && uri.Host == "api.deezer.com")
             {
@@ -44,7 +49,7 @@ internal static class DiscoveryTests
             : Refreshed ? new { data = new[] { Album(113, "New release", "album", 3) }, total = 1 }
             : (object)new { data = new[] { Album() }, total = 2, next = "https://api.deezer.com" + path + "?index=1&limit=100" };
         internal static object Artist(long id = 42, string name = "North Star") => new { id, name };
-        internal static object Album(int id = 111, string title = "Orbit", string record_type = "album", int nb_tracks = 3) => new { id, title, artist = Artist(), release_date = "2026-10-01", record_type, nb_tracks, explicit_lyrics = true };
+        internal static object Album(int id = 111, string title = "Orbit", string record_type = "album", int nb_tracks = 3) => new { id, title, artist = Artist(), release_date = "2026-10-01", record_type, nb_tracks, explicit_lyrics = true, cover_medium = CoverUrl };
         internal static object Song(int id, string title) => new { id, title, artist = Artist(), contributors = new[] { Artist(), Artist(43, "Guest") }, duration = 180, explicit_lyrics = true, track_position = id - 100, disk_number = 1 };
         private static object[] Songs() => [Song(101, "Owned"), Song(102, "Missing"), Song(103, "Night (feat. Guest)")];
         private object Apple(string path, string query)
@@ -60,6 +65,8 @@ internal static class DiscoveryTests
     }
     internal static ArtistCatalog Catalog(string folder, Http handler, Func<DateTimeOffset>? now = null) => new(folder, handler, now, TimeSpan.Zero);
     internal static readonly CatalogArtist Star = new("deezer:42", "North Star");
+    internal const string CoverUrl = "https://cdn-images.dzcdn.net/synthetic.png";
+    internal static readonly byte[] Cover = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGOwiar4DwAD8gIOqtKZYAAAAABJRU5ErkJggg==");
     internal static readonly CatalogRelease Orbit = new("deezer:111", "Orbit", Star, "2026-10-01", "album", 3);
     internal static CatalogSong Song(string id, string title, bool? explicitFlag = true) => new(id, title, [Star], 180, explicitFlag);
 
@@ -146,8 +153,40 @@ internal static class DiscoveryTests
             await Check.ThrowsAsync<OperationCanceledException>(() => cancel.SearchAsync("Artist", false, stop.Token), "cancellation does not trigger fallback requests");
             Check.Equal(1, cancelHttp.Calls.Count, "cancelled browsing stops its network work");
         }
+        await Editions();
         await Artwork();
         await Actions();
+    }
+
+    private static async Task Editions()
+    {
+        Check.Section("catalog editions: explicit preference, regional aliases and legacy caches");
+        var standard = Orbit with { Id = "apple:10", Title = "Thank Me Later", Count = 14, Explicit = true };
+        var variants = new[]
+        {
+            standard, standard with { Id = "apple:11", Explicit = false },
+            standard with { Id = "apple:12", Title = "Thank Me Later (Int’l Version)", Count = 1 },
+            standard with { Id = "apple:13", Title = "Thank Me Later (Deluxe Version)", Count = 16 },
+            standard with { Id = "apple:14", Title = "Thank Me Later (Deluxe Edition)", Count = 16, Explicit = false },
+            standard with { Id = "apple:15", Title = "Thank Me Later (Live)" },
+            standard with { Id = "apple:16", Title = "Thank Me Later (2026 Remaster)" },
+            standard with { Id = "apple:17", Title = "Thank Me Later (10th Anniversary)" },
+        };
+        var selected = CatalogEditions.Consolidate(variants);
+        Check.Equal(5, selected.Count, "clean and regional duplicates collapse, distinct editions remain");
+        Check.Equal("apple:10", selected.Single(r => r.Title == "Thank Me Later").Id, "complete explicit standard version wins over clean and one-track duplicate");
+        Check.Equal("apple:13", selected.Single(r => r.Title.Contains("Deluxe")).Id, "deluxe aliases collapse to their explicit release");
+        Check.True(CatalogEditions.Same("Thank Me Later (Int'l Version)", "Thank Me Later"), "local International tag matches standard catalog release");
+        Check.True(!CatalogEditions.Same("Thank Me Later (Deluxe)", "Thank Me Later"), "standard and deluxe never merge");
+        Check.True(!CatalogEditions.Same("Clean", ""), "an album literally named Clean is not stripped");
+        Check.Equal(2, CatalogEditions.Consolidate([standard, standard with { Artist = new("apple:99", "Another artist") }]).Count, "same-title albums from different artists remain separate");
+        Check.Equal(2, CatalogEditions.Consolidate([standard, standard with { Kind = "single" }]).Count, "single and album identities remain separate");
+        var folder = Check.NewFolder("catalog-legacy-editions");
+        var key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("artist:" + Star.Id))).ToLowerInvariant() + ".json";
+        File.WriteAllText(Path.Combine(folder, key), JsonSerializer.Serialize(new { Version = 1, SavedAt = DateTimeOffset.UtcNow, Value = new CatalogProfile(Star, [], variants.ToList()) }));
+        var http = new Http { Offline = true }; using var catalog = Catalog(folder, http);
+        Check.Equal(5, (await catalog.ArtistAsync(Star, false, default)).Value.Releases.Count, "existing 2.8.0 profile caches are consolidated without clearing or refreshing");
+        Check.Equal(0, http.Calls.Count, "cached edition cleanup works offline without additional requests");
     }
 
     private static async Task Artwork()
@@ -155,7 +194,7 @@ internal static class DiscoveryTests
         Check.Section("catalog artwork: bounded cache and trusted provider URLs");
         var http = new Http { Override = (_, _) =>
         {
-            var content = new ByteArrayContent(Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR1sAAAAASUVORK5CYII="));
+            var content = new ByteArrayContent(Cover);
             content.Headers.ContentType = new("image/png"); return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
         } };
         using var catalog = Catalog(Check.NewFolder("catalog-art"), http);

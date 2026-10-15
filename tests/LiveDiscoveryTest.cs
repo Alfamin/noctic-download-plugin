@@ -27,12 +27,21 @@ internal static class LiveDiscoveryTest
             if (exact.Length != 1) continue;
             var artist = await catalog.ArtistAsync(exact[0], false, stop.Token);
             Check.True(artist.Value.Releases.Count > 0 && artist.Value.Popular.Count > 0, "live metadata: releases and popular songs for " + name);
-            var release = artist.Value.Releases.First(a => a.Count > 0);
+            var title = Environment.GetEnvironmentVariable("FMF_DISCOVERY_ALBUM");
+            var release = artist.Value.Releases.First(a => a.Count > 0 && (string.IsNullOrEmpty(title) || CatalogEditions.Same(a.Title, title)));
             var album = await catalog.AlbumAsync(release, false, stop.Token);
             Check.True(album.Value.Songs.Count > 0 && album.Value.Songs.All(s => !string.IsNullOrWhiteSpace(s.Request.Artist) && !string.IsNullOrWhiteSpace(s.Request.Title)), "live metadata: album songs produce usable recording requests");
             Console.WriteLine($"  {artist.Value.Artist.Name}: {artist.Value.Artist.Id.Split(':')[0]}, {artist.Value.Releases.Count} releases, {artist.Value.Popular.Count} popular songs; {album.Value.Release.Title}: {album.Value.Songs.Count}/{album.Value.Release.Count} songs. {artist.Value.Notice} {album.Value.Notice}");
             var again = await catalog.AlbumAsync(release, false, stop.Token);
             Check.True(again.Cached, "live metadata: opening release again reuses saved catalog");
+            if (!string.IsNullOrEmpty(title)) Check.Equal(1, artist.Value.Releases.Count(a => CatalogEditions.Same(a.Title, title)), "live metadata: one preferred album tile across clean/explicit variants");
+            if (Environment.GetEnvironmentVariable("FMF_DISCOVERY_ART") == "1")
+            {
+                var art = await catalog.ArtworkAsync(album.Value.Release.Artwork, stop.Token);
+                Check.True(art is not null && File.Exists(art), "live metadata: album cover saved through the selected proxy route");
+                Check.Equal(art, await catalog.ArtworkAsync(album.Value.Release.Artwork, stop.Token), "live metadata: repeated album cover uses cached file");
+                if (art is not null) Console.WriteLine("  Cover: " + new FileInfo(art).Length + " bytes in isolated metadata cache.");
+            }
         }
         Console.WriteLine($"{Check.Passed} ok, {Check.Failed} wrong. Public metadata only; zero Telegram requests, zero audio downloads, zero library writes.");
         if (Check.Failed > 0) throw new InvalidOperationException("Live metadata checks failed.");

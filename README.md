@@ -8,6 +8,11 @@ catalog metadata. The native grids, tabs and track-row templates stay in use. Mi
 have **Download now** and **Queue download** actions; Ctrl+click selects several for download.
 Browsing requests metadata and cover art only. No audio is downloaded until you choose it.
 
+Version **2.8.1** groups clean/explicit and regional duplicates into one explicit-preferred
+tile per edition; deluxe, live, remastered and anniversary editions remain separate. Local
+international-version tags match that tile instead of adding a partial local duplicate.
+Album header covers load from the catalog cache and survive native library refreshes.
+
 Version 2.6 adds a **Playlists** tab: paste several Spotify playlists, match songs across
 all local library folders, and create ordered Noctis playlists. Unique missing recordings wait
 in the shared queue until you start them; new downloads fill their original positions.

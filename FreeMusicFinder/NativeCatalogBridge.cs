@@ -31,16 +31,16 @@ internal static class NativeCatalogBridge
         var existing = Values(releasesField.GetValue(vm)); var appears = Values(appearsField.GetValue(vm));
         var map = new Dictionary<object, CatalogRelease>(ReferenceEqualityComparer.Instance);
         var native = new List<object>(); var featured = new List<object>();
-        foreach (var release in profile.Releases)
+        var releases = CatalogEditions.Consolidate(profile.Releases);
+        foreach (var release in releases)
         {
-            var owned = existing.Concat(appears).FirstOrDefault(a => BotText.Key(Get(a, "Name") as string) == BotText.Key(release.Title)
-                && BotText.Key(Get(a, "Artist") as string) == BotText.Key(release.Artist.Name));
+            var owned = existing.Concat(appears).FirstOrDefault(a => CatalogEditions.Matches(release, Get(a, "Name") as string ?? "", Get(a, "Artist") as string ?? ""));
             var album = Album(type, release, owned);
             map.Add(album, release);
             (release.Artist.Id == profile.Artist.Id ? native : featured).Add(album);
         }
         // Same-name local releases are represented by a catalog tile; local-only/unreleased albums stay.
-        bool Represented(object a) => profile.Releases.Any(r => BotText.Key(r.Title) == BotText.Key(Get(a, "Name") as string) && BotText.Key(r.Artist.Name) == BotText.Key(Get(a, "Artist") as string));
+        bool Represented(object a) => releases.Any(r => CatalogEditions.Matches(r, Get(a, "Name") as string ?? "", Get(a, "Artist") as string ?? ""));
         native.AddRange(existing.Where(a => !Represented(a))); featured.AddRange(appears.Where(a => !Represented(a)));
         var oldReleases = releasesField.GetValue(vm); var oldAppears = appearsField.GetValue(vm); var oldLatest = Get(vm, "LatestRelease");
         try
@@ -48,7 +48,7 @@ internal static class NativeCatalogBridge
             releasesField.SetValue(vm, List(type, native.OrderByDescending(a => Get(a, "Year"))));
             appearsField.SetValue(vm, List(type, featured));
             apply.Invoke(vm, null);
-            var latest = profile.Releases.FirstOrDefault(r => r.Artist.Id == profile.Artist.Id);
+            var latest = releases.FirstOrDefault(r => r.Artist.Id == profile.Artist.Id);
             if (latest is not null) Set(vm, "LatestRelease", map.First(m => m.Value.Id == latest.Id).Key);
             // Native header commands enumerate _allReleases directly. Only the rendered
             // collections may retain catalog tiles; command inputs must remain local.
@@ -87,15 +87,32 @@ internal static class NativeCatalogBridge
     private static object GetLibrary(object main) => main.GetType().GetField("_library", Private)?.GetValue(main) ?? throw Unsupported("local library");
     internal static object OpenAlbum(object main, object tile, CatalogAlbum metadata, IReadOnlyDictionary<string, DiscoveryMatch> matches)
     {
+        var album = AlbumForPage(main, tile, metadata, matches);
+        var open = AlbumNavigation(main.GetType(), album.GetType());
+        var args = open.GetParameters().Select(p => p.DefaultValue).ToArray(); args[0] = album; open.Invoke(main, args);
+        var vm = Get(main, "CurrentView") ?? throw Unsupported("native album page");
+        AlbumArtwork(vm, Get(album, "ArtworkPath") as string); return vm;
+    }
+    internal static object AlbumForPage(object main, object tile, CatalogAlbum metadata, IReadOnlyDictionary<string, DiscoveryMatch> matches)
+    {
         var type = tile.GetType(); var album = Activator.CreateInstance(type)!;
         foreach (var name in new[] { "Id", "Name", "Artist", "Year", "TrackCount", "ArtworkPath" }) Set(album, name, Get(tile, name));
         var tracks = LocalTracks(main);
-        var owned = metadata.Songs.Select(s => matches[s.Id].Local?.Id).Where(id => id is not null).Distinct().Select(id => tracks.FirstOrDefault(t => Equals(Get(t, "Id"), id))).Where(t => t is not null).Cast<object>().ToArray();
+        var originals = Values(Get(GetLibrary(main), "Albums")).Where(a => CatalogEditions.Matches(metadata.Release, Get(a, "Name") as string ?? "", Get(a, "Artist") as string ?? "")).SelectMany(a => Values(Get(a, "Tracks")));
+        var owned = metadata.Songs.Select(s => matches[s.Id].Local?.Id).Where(id => id is not null).Distinct().Select(id => tracks.FirstOrDefault(t => Equals(Get(t, "Id"), id))).Where(t => t is not null).Cast<object>()
+            .Concat(originals).Where(t => Get(t, "FilePath") is string path && File.Exists(path)).DistinctBy(t => Get(t, "Id")).ToArray();
         var trackType = type.GetProperty("Tracks")!.PropertyType.GenericTypeArguments.Single(); Set(album, "Tracks", List(trackType, owned));
         Set(album, "TotalDuration", TimeSpan.FromSeconds(metadata.Songs.Sum(s => s.Seconds ?? 0)));
-        var open = AlbumNavigation(main.GetType(), type);
-        var args = open.GetParameters().Select(p => p.DefaultValue).ToArray(); args[0] = album; open.Invoke(main, args);
-        return Get(main, "CurrentView") ?? throw Unsupported("native album page");
+        return album;
+    }
+    internal static bool AlbumArtwork(object vm, string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return false;
+        Set(Get(vm, "Album")!, "ArtworkPath", path);
+        // AlbumDetailView binds to HeaderArtPath, not Album.ArtworkPath. Its generated
+        // setter also refreshes the native cover viewer, tint and property notifications.
+        if (!Equals(Get(vm, "HeaderArtPath"), path)) Set(vm, "HeaderArtPath", path);
+        return true;
     }
     internal static MethodInfo AlbumNavigation(Type shell, Type album) => shell.GetMethods(Private | BindingFlags.Public).SingleOrDefault(m => m.Name == "OpenAlbumDetail" && m.GetParameters().FirstOrDefault()?.ParameterType == album && m.GetParameters().Skip(1).All(p => p.HasDefaultValue)) ?? throw Unsupported("native album navigation");
     internal static void OpenArtist(object main, string name)

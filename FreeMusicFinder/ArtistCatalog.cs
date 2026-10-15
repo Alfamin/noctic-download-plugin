@@ -69,10 +69,10 @@ internal sealed class ArtistCatalog : IDisposable
         }, ct);
     }
 
-    public Task<CatalogResult<CatalogProfile>> ArtistAsync(CatalogArtist artist, bool refresh, CancellationToken ct)
+    public async Task<CatalogResult<CatalogProfile>> ArtistAsync(CatalogArtist artist, bool refresh, CancellationToken ct)
     {
         var (provider, id) = Split(artist.Id);
-        return Cached("artist:" + artist.Id, TimeSpan.FromDays(1), refresh, async () =>
+        var result = await Cached("artist:" + artist.Id, TimeSpan.FromDays(1), refresh, async () =>
         {
             CatalogProfile value;
             if (provider == "deezer")
@@ -99,7 +99,10 @@ internal sealed class ArtistCatalog : IDisposable
             var old = Read<CatalogProfile>("artist:" + artist.Id);
             value = value with { Releases = value.Releases.Concat(old?.Value.Releases ?? []).DistinctBy(a => a.Id).OrderByDescending(a => a.Date, StringComparer.Ordinal).ToList() };
             return value;
-        }, ct);
+        }, ct).ConfigureAwait(false);
+        // Normalize at the read boundary as well: existing 2.8.0 caches must improve
+        // immediately, without requiring a refresh or deleting their saved metadata.
+        return result with { Value = result.Value with { Releases = CatalogEditions.Consolidate(result.Value.Releases) } };
     }
 
     public Task<CatalogResult<CatalogAlbum>> AlbumAsync(CatalogRelease album, bool refresh, CancellationToken ct)
