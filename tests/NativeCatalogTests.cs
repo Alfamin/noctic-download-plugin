@@ -254,6 +254,31 @@ internal static class NativeCatalogTests
         shell.CurrentView = correctVm; identityWindow.Content = correctView; identityPages.Scan();
         Check.True(!Values(Get(correctVm, "Releases")).Any(a => Equals(Get(a, "Name"), "Late Night Sessions")), "returning to the library artist keeps the corrected catalog");
         identityWindow.Close(); identityPages.Dispose(); ((IDisposable)correctVm).Dispose(); ((IDisposable)namesakeVm).Dispose(); shell.ArtistFactory = null; originalAlbums.Remove(secondAlbum);
+
+        Check.Section("album navigation: live-reported stale Opening status after leaving the artist");
+        var openingFolder = Check.NewFolder("native-opening-cancel");
+        ArtistIdentityTests.Seed(openingFolder, "search:NORTH STAR", new[] { DiscoveryTests.Star }); ArtistIdentityTests.Seed(openingFolder, "artist:" + DiscoveryTests.Star.Id, profile);
+        int opening = 0, openingCancelled = 0;
+        var openingHttp = new DiscoveryTests.Http { Override = async (request, ct) =>
+        {
+            if (ArtistCatalog.ArtworkUrl(request.RequestUri?.AbsoluteUri)) return ArtworkQualityTests.Image(DiscoveryTests.Cover);
+            Interlocked.Exchange(ref opening, 1);
+            try { await Task.Delay(Timeout.Infinite, ct); } catch (OperationCanceledException) { Interlocked.Exchange(ref openingCancelled, 1); throw; }
+            return new();
+        } };
+        using var openingCatalog = DiscoveryTests.Catalog(openingFolder, openingHttp); var openingVm = NewArtist("North Star"); shell.CurrentView = openingVm;
+        var openingView = (UserControl)Activator.CreateInstance(artistView.GetType())!; openingView.DataContext = openingVm;
+        var openingWindow = new Window { Content = openingView, Width = 1280, Height = 950 }; openingWindow.Show();
+        using var openingPages = new NativeCatalogPages(() => openingCatalog, actions, logs.Add, () => true, () => shell, window: () => openingWindow);
+        Check.Until(() => openingView.GetVisualDescendants().OfType<TextBlock>().Any(t => t.Text?.Contains("online releases") == true), "artist is ready before navigation regression check");
+        var openTile = Values(Get(openingVm, "Releases")).First(a => Equals(Get(a, "Name"), "Orbit")); var openButton = new Button { DataContext = openTile, Content = "Open synthetic album" };
+        openingView.FindControl<StackPanel>("PageContent")!.Children.Add(openButton); Dispatcher.UIThread.RunJobs(); openButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent, openButton));
+        Check.Until(() => Volatile.Read(ref opening) == 1, "album request begins from the native artist tile");
+        shell.CurrentView = new object(); openingWindow.Content = new UserControl(); openingPages.Scan();
+        Check.Until(() => Volatile.Read(ref openingCancelled) == 1, "leaving the artist cancels its unfinished album request");
+        shell.CurrentView = openingVm; openingWindow.Content = openingView; openingPages.Scan();
+        Check.True(openingView.GetVisualDescendants().OfType<TextBlock>().Any(t => t.Text?.Contains("online releases") == true) && !openingView.GetVisualDescendants().OfType<TextBlock>().Any(t => t.Text?.StartsWith("Opening ") == true), "Back shows ready catalog status instead of stale Opening text");
+        openingWindow.Close(); openingPages.Dispose(); ((IDisposable)openingVm).Dispose();
         ((IDisposable)albumVm).Dispose(); ((IDisposable)artistVm).Dispose();
         if (player is IDisposable disposable) disposable.Dispose();
     }

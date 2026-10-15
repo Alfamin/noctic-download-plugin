@@ -30,6 +30,7 @@ internal sealed partial class ArtistCatalog : IDisposable
     private DateTimeOffset _nextApple;
     private readonly Dictionary<string, DateTimeOffset> _wait = new();
     private readonly SemaphoreSlim _artGate = new(2, 2);
+    private readonly SemaphoreSlim[] _artLocks = Enumerable.Range(0, 16).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
     private readonly Dictionary<string, object> _memory = new();
     private readonly Dictionary<string, (CatalogProfile Raw, CatalogProfile View)> _profileViews = new();
     private sealed record Cache<T>(int Version, DateTimeOffset SavedAt, T Value, string Warning = "");
@@ -352,31 +353,40 @@ internal sealed partial class ArtistCatalog : IDisposable
     private static double? Duration(double seconds) => seconds is > 0 and <= 86400 ? seconds : null;
     internal static bool ArtworkUrl(string? value) => Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme == "https" && uri.IsDefaultPort && uri.UserInfo.Length == 0 &&
         (uri.Host == "cdn-images.dzcdn.net" || System.Text.RegularExpressions.Regex.IsMatch(uri.Host, @"^is[1-9][0-9]?-ssl\.mzstatic\.com$"));
-    public string? SavedArtwork(string? url)
+    public string? SavedArtwork(string? url, bool highQuality = false)
     {
         if (!ArtworkUrl(url)) return null;
-        try { var path = SafeFile("art-" + Key(url!)[..64] + ".img")!; return File.Exists(path) && new FileInfo(path).Length is > 0 and <= 512 * 1024 ? path : null; }
+        try { var path = SafeFile("art-" + Key(url!)[..64] + ".img")!; return File.Exists(path) && new FileInfo(path).Length is > 0 and var bytes && bytes <= (highQuality ? 4 * 1024 * 1024 : 512 * 1024) ? path : null; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException) { return null; }
     }
-    public async Task<string?> ArtworkAsync(string url, CancellationToken ct)
+    public async Task<string?> ArtworkAsync(string url, CancellationToken ct, bool highQuality = false)
     {
         if (!ArtworkUrl(url)) return null;
+        var sameImage = _artLocks[(int)((uint)StringComparer.Ordinal.GetHashCode(url) % (uint)_artLocks.Length)];
+        await sameImage.WaitAsync(ct).ConfigureAwait(false);
+        try { return await FetchArtwork(url, ct, highQuality).ConfigureAwait(false); }
+        finally { sameImage.Release(); }
+    }
+    private async Task<string?> FetchArtwork(string url, CancellationToken ct, bool highQuality)
+    {
         await _artGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (SavedArtwork(url) is {} saved) return saved;
+            if (SavedArtwork(url, highQuality) is {} saved) return saved;
+            var limit = highQuality ? 4 * 1024 * 1024 : 512 * 1024;
             var path = SafeFile("art-" + Key(url)[..64] + ".img")!;
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(25));
             using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > 512 * 1024 || response.Content.Headers.ContentType?.MediaType is not ("image/jpeg" or "image/png" or "image/webp")) return null;
+            if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > limit || response.Content.Headers.ContentType?.MediaType is not ("image/jpeg" or "image/png" or "image/webp")) return null;
             await using var input = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false); using var data = new MemoryStream(); var bytes = new byte[16384];
-            while (true) { var n = await input.ReadAsync(bytes, timeout.Token).ConfigureAwait(false); if (n == 0) break; if (data.Length + n > 512 * 1024) return null; data.Write(bytes, 0, n); }
-            if (data.Length == 0) return null;
+            while (true) { var n = await input.ReadAsync(bytes, timeout.Token).ConfigureAwait(false); if (n == 0) break; if (data.Length + n > limit) return null; data.Write(bytes, 0, n); }
+            var dimensions = CatalogArtwork.Dimensions(data.ToArray());
+            if (dimensions.Width is < 1 or > 8192 || dimensions.Height is < 1 or > 8192 || (long)dimensions.Width * dimensions.Height > 32 * 1024 * 1024) return null;
             Directory.CreateDirectory(_folder); var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try { await using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { data.Position = 0; await data.CopyToAsync(output, timeout.Token).ConfigureAwait(false); } File.Move(temp, path, overwrite: false); }
             catch (IOException) when (File.Exists(path)) { }
             finally { if (File.Exists(temp)) File.Delete(temp); }
-            return SavedArtwork(url);
+            return SavedArtwork(url, highQuality);
         }
         finally { _artGate.Release(); }
     }

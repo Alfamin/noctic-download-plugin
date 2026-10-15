@@ -25,6 +25,13 @@ that visit, without replacing the identity used by your local artist page. Artis
 shows round profile pictures and genres instead of raw provider IDs. Pictures load only for
 visible results, use the existing proxy route and cache, and fall back to initials.
 
+Version **2.8.4** shows quick artwork previews, then upgrades visible catalog covers to
+1200px on Apple / 1000px on Deezer and artist search photos to 640px on Apple. Sharp cached
+images appear immediately on later visits. Failed upgrades retain the preview; existing
+custom/local art is preserved. Downloads share the same proxy route, are limited to two
+at a time, and large files/dimensions are bounded. Old thumbnail caches upgrade automatically.
+Leaving an artist also cancels unfinished album navigation and clears stale Opening text.
+
 Version 2.6 adds a **Playlists** tab: paste several Spotify playlists, match songs across
 all local library folders, and create ordered Noctis playlists. Unique missing recordings wait
 in the shared queue until you start them; new downloads fill their original positions.

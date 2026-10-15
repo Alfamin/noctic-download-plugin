@@ -48,6 +48,7 @@ try
     await CatalogPerformanceTests.RunAsync();
     await ArtistIdentityTests.RunAsync();
     await ArtistPortraitTests.RunAsync();
+    await ArtworkQualityTests.RunAsync();
     await DiscoveryNetworkTests.RunAsync();
     await LivePlaylistTest.RunAsync(Environment.GetEnvironmentVariable("FMF_SPOTIFY_PLAYLIST"), Environment.GetEnvironmentVariable("FMF_LIBRARY_SNAPSHOT"), Environment.GetEnvironmentVariable("FMF_LIVE_REPORT"));
 

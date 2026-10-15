@@ -43,9 +43,11 @@ internal sealed class NativeCatalogPages : IDisposable
     private readonly HashSet<object> _pending = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<object> _albumLoading = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<object> _artAttempted = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<object, CancellationTokenSource> _artLoads = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<object, (UserControl Page, WrapPanel Notice)> _albumNotices = new(ReferenceEqualityComparer.Instance);
     private readonly string? _choicesPath;
     private CancellationTokenSource? _openStop;
+    private object? _openOrigin;
     private bool _disposed, _reported;
     private sealed class ArtistState(object vm, UserControl page, StackPanel panel)
     {
@@ -58,6 +60,7 @@ internal sealed class NativeCatalogPages : IDisposable
         public bool Interrupted;
         public IReadOnlyList<object> Displayed = []; public string ViewKey = "";
         public bool Busy;
+        public string ReadyStatus = "";
         public EventHandler<RoutedEventArgs>? Click;
         public EventHandler<ContextRequestedEventArgs>? Context;
     }
@@ -127,6 +130,9 @@ internal sealed class NativeCatalogPages : IDisposable
         }
         if (ReferenceEquals(_observedView, current)) return;
         _observedView = current;
+        if (_openStop is not null && !ReferenceEquals(_openOrigin, current)) _openStop.Cancel();
+        foreach (var state in _artists.Values.Where(s => !ReferenceEquals(s.Vm, current) && s.Status.Text?.StartsWith("Opening ", StringComparison.Ordinal) == true)) state.Status.Text = state.ReadyStatus;
+        foreach (var (tile, work) in _artLoads.ToArray()) { _artAttempted.Remove(tile); work.Cancel(); }
         foreach (var state in _artists.Values.Where(s => s.Busy && !ReferenceEquals(s.Vm, current))) { state.Interrupted = true; state.LoadStop?.Cancel(); }
         if (_viewNotify is not null) _viewNotify.PropertyChanged -= OnViewChanged;
         _viewNotify = current as INotifyPropertyChanged; if (_viewNotify is not null) _viewNotify.PropertyChanged += OnViewChanged;
@@ -172,7 +178,8 @@ internal sealed class NativeCatalogPages : IDisposable
                 var at = button.TranslatePoint(default, window);
                 if (at is not {} point || point.Y + button.Bounds.Height < 0 || point.Y > window.Bounds.Height) continue;
                 var tile = button.DataContext!;
-                if (string.IsNullOrEmpty(Get(tile, "ArtworkPath") as string) && _tiles[tile].Artwork is { Length: > 0 } url && _artAttempted.Add(tile)) _ = LoadArtwork(tile, url);
+                var path = Get(tile, "ArtworkPath") as string;
+                if (_tiles[tile].Artwork is { Length: > 0 } url && (string.IsNullOrEmpty(path) || path == _catalog().SavedArtwork(url)) && !_artLoads.ContainsKey(tile) && _artAttempted.Add(tile)) _ = LoadArtwork(tile, url);
             }
         }
         catch (Exception ex) { if (!_reported) { _reported = true; _log("CATALOG_HOST_UNSUPPORTED: " + ex.Message); } }
@@ -236,6 +243,7 @@ internal sealed class NativeCatalogPages : IDisposable
             if (!ReferenceEquals(state.Profile, result.Value)) { state.Profile = result.Value; Apply(state); }
             state.Status.Text = $"{result.Value.Releases.Count} online releases · {(identity.Id.StartsWith("apple:") ? "Apple Music" : "Deezer")}" + (result.Cached ? " · cached catalog" : "");
             if (identity.Genre.Length > 0) state.Status.Text += " · " + identity.Genre;
+            state.ReadyStatus = state.Status.Text;
             ToolTip.SetTip(state.Status, identity.Id + " · " + result.Value.Notice + " " + result.Warning);
             var retry = NativeButton("Refresh catalog"); retry.Click += (_, _) => { _ = LoadArtist(page, vm, true); }; state.Strip.Children.Add(retry);
         }
@@ -314,12 +322,12 @@ internal sealed class NativeCatalogPages : IDisposable
         var tile = TileAt(button);
         if (tile is null && ReferenceEquals(button.Command, Get(state.Vm, "PlayLatestReleaseCommand"))) tile = Get(state.Vm, "LatestRelease");
         if (tile is null || !_tiles.TryGetValue(tile, out var release)) return;
-        e.Handled = true; _ = OpenRelease(tile, release, state.Status);
+        e.Handled = true; _ = OpenRelease(tile, release, state);
     }
-    private async Task OpenRelease(object tile, CatalogRelease release, TextBlock status)
+    private async Task OpenRelease(object tile, CatalogRelease release, ArtistState state)
     {
         _openStop?.Cancel(); var stop = _openStop = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
-        var origin = _main() is {} shell ? Get(shell, "CurrentView") : null;
+        var origin = _openOrigin = _main() is {} shell ? Get(shell, "CurrentView") : null; var status = state.Status;
         try
         {
             status.Text = "Opening " + release.Title + "… Reading metadata only.";
@@ -329,7 +337,15 @@ internal sealed class NativeCatalogPages : IDisposable
         }
         catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
         catch (Exception ex) { if (!_disposed) status.Text = ArtistCatalog.Explain(ex); }
-        finally { if (ReferenceEquals(_openStop, stop)) _openStop = null; stop.Dispose(); }
+        finally
+        {
+            if (ReferenceEquals(_openStop, stop))
+            {
+                if (status.Text?.StartsWith("Opening ", StringComparison.Ordinal) == true) status.Text = state.ReadyStatus;
+                _openStop = null; _openOrigin = null;
+            }
+            stop.Dispose();
+        }
     }
     private async Task LoadAlbum(UserControl page, object vm)
     {
@@ -388,24 +404,34 @@ internal sealed class NativeCatalogPages : IDisposable
     }
     private async Task LoadArtwork(object tile, string url)
     {
+        using var work = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token); _artLoads[tile] = work;
         try
         {
-            var path = await _catalog().ArtworkAsync(url, _stop.Token);
-            if (path is null || _disposed || !_tiles.ContainsKey(tile)) return;
-            Set(tile, "ArtworkPath", path);
-            var notify = tile.GetType().GetMethod("OnPropertyChanged", Private, [typeof(string)]);
-            notify?.Invoke(tile, ["ArtworkPath"]);
+            await _catalog().ProgressiveArtworkAsync(url, async path => await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                if (_disposed || !_enabled() || work.IsCancellationRequested || !_tiles.ContainsKey(tile)) return;
+                // Decode before replacing a usable preview. Invalid optional art must not
+                // turn a working image into a blank native control.
+                using var decoded = new Avalonia.Media.Imaging.Bitmap(path);
+                Set(tile, "ArtworkPath", path);
+                var notify = tile.GetType().GetMethod("OnPropertyChanged", Private, [typeof(string)]);
+                notify?.Invoke(tile, ["ArtworkPath"]);
+            }), work.Token);
         }
         catch (OperationCanceledException) { }
         catch (Exception) { /* Optional cover art keeps the native placeholder on a network/cache error. */ }
+        finally { _artLoads.Remove(tile); }
     }
     private void EnsureAlbumArtwork(AlbumState state)
     {
         // A native library refresh resets HeaderArtPath to its persistence folder. The
         // catalog cover remains in our cache, so restore that view binding without refetching.
-        var native = Get(state.Vm, "HeaderArtPath") as string;
-        var path = !string.IsNullOrWhiteSpace(native) && File.Exists(native) ? native : state.CoverPath ?? state.OriginalHeaderArt ?? Get(Get(state.Vm, "Album")!, "ArtworkPath") as string;
-        if (AlbumArtwork(state.Vm, path)) { state.CoverPath = path; return; }
+        var native = Get(state.Vm, "HeaderArtPath") as string; var catalog = _catalog(); var url = state.Metadata.Release.Artwork;
+        var preview = catalog.SavedArtwork(url); var sharp = catalog.SavedArtwork(CatalogArtwork.LargeUrl(url), highQuality: true);
+        if (!string.IsNullOrWhiteSpace(native) && File.Exists(native) && native != preview && native != sharp && native != state.CoverPath) return;
+        var path = sharp ?? state.CoverPath ?? preview ?? state.OriginalHeaderArt ?? Get(Get(state.Vm, "Album")!, "ArtworkPath") as string;
+        if (AlbumArtwork(state.Vm, path)) state.CoverPath = path;
+        if (sharp is not null) return;
         if (state.LoadingCover || DateTimeOffset.UtcNow < state.CoverRetry || !ArtistCatalog.ArtworkUrl(state.Metadata.Release.Artwork)) return;
         state.LoadingCover = true; _ = LoadAlbumArtwork(state);
     }
@@ -413,9 +439,14 @@ internal sealed class NativeCatalogPages : IDisposable
     {
         try
         {
-            var path = await _catalog().ArtworkAsync(state.Metadata.Release.Artwork, _stop.Token);
-            if (_disposed || !_enabled() || !_albums.TryGetValue(state.Vm, out var active) || !ReferenceEquals(active, state)) return;
-            if (AlbumArtwork(state.Vm, path)) state.CoverPath = path;
+            await _catalog().ProgressiveArtworkAsync(state.Metadata.Release.Artwork, async path => await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                if (_disposed || !_enabled() || !_albums.TryGetValue(state.Vm, out var active) || !ReferenceEquals(active, state)) return;
+                var current = Get(state.Vm, "HeaderArtPath") as string;
+                if (File.Exists(current) && current != state.CoverPath && current != _catalog().SavedArtwork(state.Metadata.Release.Artwork) && current != _catalog().SavedArtwork(CatalogArtwork.LargeUrl(state.Metadata.Release.Artwork), highQuality: true)) return;
+                using var decoded = new Avalonia.Media.Imaging.Bitmap(path);
+                if (AlbumArtwork(state.Vm, path)) state.CoverPath = path;
+            }), _stop.Token);
         }
         catch (OperationCanceledException) { }
         catch (Exception) { /* A failed optional cover never replaces usable local artwork or blocks songs. */ }
@@ -438,6 +469,7 @@ internal sealed class NativeCatalogPages : IDisposable
             if (state.Context is not null) state.Page.RemoveHandler(Control.ContextRequestedEvent, state.Context);
             state.Panel.Children.Remove(state.Strip); try { RestoreArtist(state.Vm); } catch { }
         }
+        foreach (var work in _artLoads.Values.ToArray()) work.Cancel();
         _albums.Clear(); _artists.Clear(); _tiles.Clear(); _artAttempted.Clear();
         foreach (var notice in _albumNotices.Values) if (notice.Notice.Parent is Panel panel) panel.Children.Remove(notice.Notice);
         _albumNotices.Clear(); _opened.Clear(); _requestedArtists.Clear();

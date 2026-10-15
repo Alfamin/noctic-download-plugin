@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
+using Avalonia.Threading;
 
 namespace FreeMusicFinder;
 
@@ -28,10 +29,12 @@ internal sealed class ArtistPicture : UserControl, IDisposable
         _stop = CancellationTokenSource.CreateLinkedTokenSource(ct); ct = _stop.Token;
         try
         {
-            var path = await catalog.PortraitAsync(artist, ct);
-            if (_disposed || ct.IsCancellationRequested || path is null) return;
-            await using var input = File.OpenRead(path);
-            _bitmap = Bitmap.DecodeToWidth(input, 160); _image.Source = _bitmap; _image.IsVisible = true;
+            await catalog.PortraitAsync(artist, ct, async path => await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                if (_disposed || ct.IsCancellationRequested) return;
+                using var input = File.OpenRead(path); var next = Bitmap.DecodeToWidth(input, 640);
+                var previous = _bitmap; _bitmap = next; _image.Source = next; _image.IsVisible = true; previous?.Dispose();
+            }));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HttpRequestException or TimeoutException or SourcesWaitingException or ArgumentException or OperationCanceledException or System.Text.RegularExpressions.RegexMatchTimeoutException) { }
     }

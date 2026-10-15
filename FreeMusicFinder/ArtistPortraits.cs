@@ -9,17 +9,18 @@ internal sealed partial class ArtistCatalog
     // Portrait lookups never hold the catalog gate or delay opening a result. A single
     // route handles these public pages, their images and the rest of the metadata.
     private readonly SemaphoreSlim _portraitGate = new(2, 2);
-    public async Task<string?> PortraitAsync(CatalogArtist artist, CancellationToken ct)
+    public async Task<string?> PortraitAsync(CatalogArtist artist, CancellationToken ct, Func<string, Task>? show = null)
     {
         var (provider, id) = Split(artist.Id);
-        if (ArtworkUrl(artist.Picture)) return await ArtworkAsync(artist.Picture, ct).ConfigureAwait(false);
+        Task<string?> Image(string url) => show is null ? ArtworkAsync(url, ct) : ProgressiveArtworkAsync(url, show, ct, size: 640);
+        if (ArtworkUrl(artist.Picture)) return await Image(artist.Picture).ConfigureAwait(false);
         var key = "portrait:" + artist.Id;
         await _portraitGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             var saved = await ReadAsync<string>(key, ct).ConfigureAwait(false);
             if (saved is not null && _now() - saved.SavedAt < TimeSpan.FromDays(saved.Value.Length > 0 ? 7 : 1))
-                return saved.Value.Length == 0 ? null : await ArtworkAsync(saved.Value, ct).ConfigureAwait(false);
+                return saved.Value.Length == 0 ? null : await Image(saved.Value).ConfigureAwait(false);
             try
             {
                 string picture;
@@ -56,7 +57,7 @@ internal sealed partial class ArtistCatalog
                 var cached = new Cache<string>(1, _now(), picture);
                 try { AtomicJson.Write(SafeFile(Key(key))!, cached); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException) { }
                 Remember(key, cached);
-                return picture.Length == 0 ? null : await ArtworkAsync(picture, ct).ConfigureAwait(false);
+                return picture.Length == 0 ? null : await Image(picture).ConfigureAwait(false);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested && ex is HttpRequestException or IOException or TimeoutException or SourcesWaitingException or OperationCanceledException or System.Text.Json.JsonException or RegexMatchTimeoutException)
             { return saved is { Value.Length: > 0 } ? SavedArtwork(saved.Value) : null; }

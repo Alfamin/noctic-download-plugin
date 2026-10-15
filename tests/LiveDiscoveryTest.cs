@@ -47,16 +47,22 @@ internal static class LiveDiscoveryTest
             if (!string.IsNullOrEmpty(title)) Check.Equal(1, artist.Value.Releases.Count(a => CatalogEditions.Same(a.Title, title)), "live metadata: one preferred album tile across clean/explicit variants");
             if (Environment.GetEnvironmentVariable("FMF_DISCOVERY_ART") == "1")
             {
-                var art = await catalog.ArtworkAsync(album.Value.Release.Artwork, stop.Token);
+                var hq = Environment.GetEnvironmentVariable("FMF_DISCOVERY_HQ") == "1";
+                Task Show(string file) { var size = CatalogArtwork.Dimensions(File.ReadAllBytes(file)); Console.WriteLine($"  COVER {size.Width}x{size.Height}, {new FileInfo(file).Length} bytes"); return Task.CompletedTask; }
+                var art = hq ? await catalog.ProgressiveArtworkAsync(album.Value.Release.Artwork, Show, stop.Token) : await catalog.ArtworkAsync(album.Value.Release.Artwork, stop.Token);
                 Check.True(art is not null && File.Exists(art), "live metadata: album cover saved through the selected proxy route");
-                Check.Equal(art, await catalog.ArtworkAsync(album.Value.Release.Artwork, stop.Token), "live metadata: repeated album cover uses cached file");
+                Check.Equal(art, hq ? await catalog.ProgressiveArtworkAsync(album.Value.Release.Artwork, _ => Task.CompletedTask, stop.Token) : await catalog.ArtworkAsync(album.Value.Release.Artwork, stop.Token), "live metadata: repeated album cover uses cached file");
+                if (hq && art is not null) Check.True(CatalogArtwork.Dimensions(File.ReadAllBytes(art)).Width >= 1000, "live artwork: final album cover is genuinely at least 1000 pixels");
                 if (art is not null) Console.WriteLine("  Cover: " + new FileInfo(art).Length + " bytes in isolated metadata cache.");
             }
             if (Environment.GetEnvironmentVariable("FMF_DISCOVERY_PORTRAIT") == "1")
             {
-                var portrait = await catalog.PortraitAsync(exact[0], stop.Token);
+                var hq = Environment.GetEnvironmentVariable("FMF_DISCOVERY_HQ") == "1";
+                Task Show(string file) { var size = CatalogArtwork.Dimensions(File.ReadAllBytes(file)); Console.WriteLine($"  PORTRAIT {size.Width}x{size.Height}, {new FileInfo(file).Length} bytes"); return Task.CompletedTask; }
+                var portrait = await catalog.PortraitAsync(exact[0], stop.Token, hq ? Show : null);
                 Check.True(portrait is not null && File.Exists(portrait), "live metadata: exact artist portrait loads through selected proxy route");
-                Check.Equal(portrait, await catalog.PortraitAsync(exact[0], stop.Token), "live metadata: repeated artist portrait uses cached file");
+                Check.Equal(portrait, await catalog.PortraitAsync(exact[0], stop.Token, hq ? _ => Task.CompletedTask : null), "live metadata: repeated artist portrait uses cached file");
+                if (hq && portrait is not null) Check.True(CatalogArtwork.Dimensions(File.ReadAllBytes(portrait)).Width >= 640, "live artwork: final artist portrait is genuinely at least 640 pixels");
                 if (portrait is not null) Console.WriteLine("  Portrait: " + new FileInfo(portrait).Length + " bytes in isolated metadata cache.");
             }
         }

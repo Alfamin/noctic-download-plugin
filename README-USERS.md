@@ -28,6 +28,10 @@ Same-name artists stay separate. Your local albums help choose the right catalog
 selections are checked again. Pictures load through your proxy, are cached, and show initials
 if unavailable. Opening another namesake from search won't change your local artist's choice.
 
+**2.8.4:** covers appear quickly, then sharpen in the background (up to 1200px on Apple,
+1000px on Deezer). Artist photos also upgrade. Sharp images are cached; slow/failed upgrades
+keep the preview. Existing local/custom covers stay intact. No cache clearing is required.
+
 For an artist outside your library: Finder → **Artists** → search → **Open in Noctis**.
 If your local albums cannot distinguish namesakes, choose by picture and genre. Download progress
 is in Finder → **Queue**. Noctis must scan downloaded songs before they become playable.
