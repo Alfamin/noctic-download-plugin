@@ -46,6 +46,8 @@ try
     await SpotifyPlaylistTests.RunAsync();
     await DiscoveryTests.RunAsync();
     await CatalogPerformanceTests.RunAsync();
+    await ArtistIdentityTests.RunAsync();
+    await ArtistPortraitTests.RunAsync();
     await DiscoveryNetworkTests.RunAsync();
     await LivePlaylistTest.RunAsync(Environment.GetEnvironmentVariable("FMF_SPOTIFY_PLAYLIST"), Environment.GetEnvironmentVariable("FMF_LIBRARY_SNAPSHOT"), Environment.GetEnvironmentVariable("FMF_LIVE_REPORT"));
 
@@ -58,6 +60,7 @@ try
     PlaylistWindowTests.Run(pictures);
     NativePlaylistTests.Run(Environment.GetEnvironmentVariable("FMF_NOCTIS_APP"));
     NativeCatalogTests.Run(Environment.GetEnvironmentVariable("FMF_NOCTIS_APP"), pictures);
+    ArtistPortraitTests.RunUi(pictures);
 }
 catch (Exception ex)
 {

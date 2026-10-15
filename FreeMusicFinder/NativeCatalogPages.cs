@@ -35,6 +35,9 @@ internal sealed class NativeCatalogPages : IDisposable
     private readonly Dictionary<object, ArtistState> _artists = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<object, AlbumState> _albums = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<string, CatalogArtist> _chosen = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _manualChoices = new(StringComparer.OrdinalIgnoreCase);
+    private sealed record ArtistChoice(string Id, string Name, string Genre = "", bool Manual = false);
+    private readonly Dictionary<object, CatalogArtist> _requestedArtists = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<object, (CatalogAlbum Metadata, object Tile)> _opened = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<object, CatalogRelease> _tiles = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<object> _pending = new(ReferenceEqualityComparer.Instance);
@@ -75,8 +78,9 @@ internal sealed class NativeCatalogPages : IDisposable
         try
         {
             if (choicesPath is not null && File.Exists(choicesPath) && new FileInfo(choicesPath).Length < 256 * 1024 && (File.GetAttributes(choicesPath) & FileAttributes.ReparsePoint) == 0)
-                foreach (var (name, artist) in System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, CatalogArtist>>(File.ReadAllText(choicesPath)) ?? [])
-                    if (name.Length <= 200 && artist is { Name.Length: > 0 and <= 1000, Id: not null } && System.Text.RegularExpressions.Regex.IsMatch(artist.Id, @"^(apple|deezer):[1-9][0-9]{0,17}$")) _chosen[name] = artist;
+                foreach (var (name, artist) in System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, ArtistChoice>>(File.ReadAllText(choicesPath)) ?? [])
+                    if (name.Length <= 200 && artist is { Name.Length: > 0 and <= 1000, Id: not null } && System.Text.RegularExpressions.Regex.IsMatch(artist.Id, @"^(apple|deezer):[1-9][0-9]{0,17}$"))
+                    { _chosen[name] = new(artist.Id, artist.Name, artist.Genre ?? ""); if (artist.Manual) _manualChoices.Add(name); }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException) { _log("CATALOG_CHOICES_UNREADABLE: saved artist choices could not be read; you can choose them again."); }
         _main = main ?? (() => (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.MainWindow?.DataContext);
@@ -175,21 +179,27 @@ internal sealed class NativeCatalogPages : IDisposable
     }
     public void OpenArtist(CatalogArtist artist)
     {
-        SaveChoice(artist.Name, artist);
         var main = _main() ?? throw Unsupported("main window"); NativeCatalogBridge.OpenArtist(main, artist.Name);
+        // A deliberate namesake search belongs to this visit. It must not overwrite the
+        // identity used by every local page with the same text name.
+        if (Get(main, "CurrentView") is {} view) _requestedArtists[view] = artist;
         _window()?.Activate();
     }
-    private async Task<CatalogArtist?> ResolveArtist(string name, WrapPanel? choices, CancellationToken ct, Action<CatalogArtist>? choose = null)
+    internal IReadOnlyList<string> LocalAlbums(string name) => _main() is {} main ? ArtistAlbums(main, name) : [];
+    private async Task<CatalogArtist?> ResolveArtist(string name, WrapPanel? choices, CancellationToken ct, Action<CatalogArtist>? choose = null, IReadOnlyList<string>? albums = null)
     {
-        if (_chosen.TryGetValue(name, out var saved)) return saved;
-        var result = await _catalog().SearchAsync(name, false, ct);
-        var exact = result.Value.Where(a => BotText.Key(a.Name) == BotText.Key(name)).ToArray();
-        if (exact.Length == 1) { SaveChoice(name, exact[0]); return exact[0]; }
+        _chosen.TryGetValue(name, out var saved);
+        if (saved is not null && _manualChoices.Contains(name)) return saved;
+        var result = await _catalog().IdentifyAsync(name, albums ?? LocalAlbums(name), saved, ct);
+        if (result.Artist is {} matched) { SaveChoice(name, matched); return matched; }
         if (choices is null) throw new InvalidOperationException("CATALOG_ARTIST_AMBIGUOUS: Open the artist page and select the correct catalog identity first. Local music was kept.");
-        foreach (var artist in exact.Length > 0 ? exact : result.Value.ToArray())
+        foreach (var artist in result.Candidates)
         {
-            var button = NativeButton(artist.Name + (artist.Genre.Length > 0 ? " · " + artist.Genre : "") + " (" + artist.Id + ")");
-            button.Click += (_, _) => { SaveChoice(name, artist); choose?.Invoke(artist); }; choices.Children.Add(button);
+            var button = NativeButton(artist.Name);
+            var picture = new ArtistPicture(artist, 36); picture.Loaded += (_, _) => picture.Load(_catalog(), artist, ct); picture.Unloaded += (_, _) => picture.Dispose();
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 }; row.Children.Add(picture);
+            row.Children.Add(new TextBlock { Text = artist.Name + (artist.Genre.Length > 0 ? " · " + artist.Genre : ""), VerticalAlignment = VerticalAlignment.Center }); button.Content = row;
+            button.Click += (_, _) => { SaveChoice(name, artist, manual: true); choose?.Invoke(artist); }; choices.Children.Add(button);
         }
         return null;
     }
@@ -213,7 +223,7 @@ internal sealed class NativeCatalogPages : IDisposable
             state.Busy = true; state.Interrupted = false; state.LoadStop = loading = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
             state.Loading.IsVisible = true; state.Strip.Children.Clear(); state.Strip.Children.Add(state.Status); state.Strip.Children.Add(state.Loading); state.Status.Text = "Loading releases… Your local music stays available.";
             var name = Get(vm, "ArtistName") as string ?? "";
-            var identity = await ResolveArtist(name, state.Strip, loading.Token, chosen => { _ = LoadArtist(state.Page, vm); });
+            var identity = _requestedArtists.GetValueOrDefault(vm) ?? await ResolveArtist(name, state.Strip, loading.Token, chosen => { _requestedArtists[vm] = chosen; _ = LoadArtist(state.Page, vm); });
             if (identity is null) { state.Status.Text = "Choose the artist's catalog once (several artists share this name):"; return; }
             var saved = await _catalog().SavedArtistAsync(identity, loading.Token); loading.Token.ThrowIfCancellationRequested();
             if (_disposed || !_enabled() || !_artists.ContainsKey(vm)) return;
@@ -225,7 +235,8 @@ internal sealed class NativeCatalogPages : IDisposable
             var result = await _catalog().ArtistAsync(identity, refresh, loading.Token); if (_disposed || !_enabled() || !_artists.ContainsKey(vm)) return;
             if (!ReferenceEquals(state.Profile, result.Value)) { state.Profile = result.Value; Apply(state); }
             state.Status.Text = $"{result.Value.Releases.Count} online releases · {(identity.Id.StartsWith("apple:") ? "Apple Music" : "Deezer")}" + (result.Cached ? " · cached catalog" : "");
-            ToolTip.SetTip(state.Status, result.Value.Notice + " " + result.Warning);
+            if (identity.Genre.Length > 0) state.Status.Text += " · " + identity.Genre;
+            ToolTip.SetTip(state.Status, identity.Id + " · " + result.Value.Notice + " " + result.Warning);
             var retry = NativeButton("Refresh catalog"); retry.Click += (_, _) => { _ = LoadArtist(page, vm, true); }; state.Strip.Children.Add(retry);
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested || loading?.IsCancellationRequested == true) { }
@@ -252,10 +263,11 @@ internal sealed class NativeCatalogPages : IDisposable
         state.Displayed = Values(Get(state.Vm, "Releases")); state.ViewKey = ViewKey(state.Vm);
     }
     private static string ViewKey(object vm) => string.Join("|", Get(vm, "SelectedTab"), Get(vm, "ReleaseSortMode"), Get(vm, "GridColumns"), vm.GetType().GetField("_query", Private)?.GetValue(vm));
-    private void SaveChoice(string name, CatalogArtist artist)
+    private void SaveChoice(string name, CatalogArtist artist, bool manual = false)
     {
         _chosen[name] = artist;
-        if (_choicesPath is not null) try { AtomicJson.Write(_choicesPath, _chosen); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { _log("CATALOG_CHOICE_SAVE_FAILED: artist choice works for this session but could not be saved."); }
+        if (manual) _manualChoices.Add(name); else _manualChoices.Remove(name);
+        if (_choicesPath is not null) try { AtomicJson.Write(_choicesPath, _chosen.ToDictionary(p => p.Key, p => new ArtistChoice(p.Value.Id, p.Value.Name, p.Value.Genre, _manualChoices.Contains(p.Key)))); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { _log("CATALOG_CHOICE_SAVE_FAILED: artist choice works for this session but could not be saved."); }
     }
     private void ReattachArtist(ArtistState state, UserControl page)
     {
@@ -341,7 +353,7 @@ internal sealed class NativeCatalogPages : IDisposable
             else
             {
                 var album = Get(vm, "Album") ?? throw Unsupported("album");
-                var identity = await ResolveArtist(Get(album, "Artist") as string ?? "", notice, _stop.Token, chosen => { _ = LoadAlbum(page, vm); });
+                var identity = await ResolveArtist(Get(album, "Artist") as string ?? "", notice, _stop.Token, chosen => { _ = LoadAlbum(page, vm); }, [Get(album, "Name") as string ?? ""]);
                 if (identity is null) { status.Text = "Choose the correct catalog artist once:"; return; }
                 var profile = await _catalog().ArtistAsync(identity!, false, _stop.Token);
                 var release = profile.Value.Releases.FirstOrDefault(r => CatalogEditions.Matches(r, Get(album, "Name") as string ?? "", Get(album, "Artist") as string ?? ""));
@@ -428,7 +440,7 @@ internal sealed class NativeCatalogPages : IDisposable
         }
         _albums.Clear(); _artists.Clear(); _tiles.Clear(); _artAttempted.Clear();
         foreach (var notice in _albumNotices.Values) if (notice.Notice.Parent is Panel panel) panel.Children.Remove(notice.Notice);
-        _albumNotices.Clear(); _opened.Clear();
+        _albumNotices.Clear(); _opened.Clear(); _requestedArtists.Clear();
     }
     private void RestoreAlbum(AlbumState state)
     {

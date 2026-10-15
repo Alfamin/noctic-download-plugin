@@ -5,7 +5,7 @@ using System.Text.Json;
 
 namespace FreeMusicFinder;
 
-internal sealed record CatalogArtist(string Id, string Name, string Genre = "");
+internal sealed record CatalogArtist(string Id, string Name, string Genre = "", string Picture = "");
 internal sealed record CatalogRelease(string Id, string Title, CatalogArtist Artist, string Date, string Kind, int Count, bool? Explicit = null, string Artwork = "");
 internal sealed record CatalogSong(string Id, string Title, List<CatalogArtist> Artists, double? Seconds, bool? Explicit, int Disc = 1, int Number = 0)
 {
@@ -20,7 +20,7 @@ internal sealed record CatalogResult<T>(T Value, DateTimeOffset SavedAt, bool Ca
 
 /// <summary>Public metadata only. No Telegram, audio, preview URLs, credentials or library writes.
 /// Cache hits work offline; refresh is explicit. Provider IDs never cross catalogs.</summary>
-internal sealed class ArtistCatalog : IDisposable
+internal sealed partial class ArtistCatalog : IDisposable
 {
     private readonly HttpClient _http;
     private readonly string _folder;
@@ -102,12 +102,13 @@ internal sealed class ArtistCatalog : IDisposable
         }, ct).ConfigureAwait(false);
         // Normalize at the read boundary as well: existing 2.8.0 caches must improve
         // immediately, without requiring a refresh or deleting their saved metadata.
+        if (result.Value.Artist.Id != artist.Id) throw Invalid("The saved artist identity does not match this profile. Refresh the catalog.");
         return Normalize(result);
     }
     public async Task<CatalogResult<CatalogProfile>?> SavedArtistAsync(CatalogArtist artist, CancellationToken ct)
     {
         Split(artist.Id); var saved = await ReadAsync<CatalogProfile>("artist:" + artist.Id, ct).ConfigureAwait(false);
-        return saved is null ? null : Normalize(new(saved.Value, saved.SavedAt, true, saved.Warning));
+        return saved is null || saved.Value.Artist.Id != artist.Id ? null : Normalize(new(saved.Value, saved.SavedAt, true, saved.Warning));
     }
     private CatalogResult<CatalogProfile> Normalize(CatalogResult<CatalogProfile> result)
     {
@@ -117,16 +118,77 @@ internal sealed class ArtistCatalog : IDisposable
             if (!_profileViews.TryGetValue(raw.Artist.Id, out var found) || !ReferenceEquals(found.Raw, raw))
             {
                 if (_profileViews.Count >= 48) _profileViews.Remove(_profileViews.Keys.First());
-                found = (raw, raw with { Releases = CatalogEditions.Consolidate(raw.Releases) }); _profileViews[raw.Artist.Id] = found;
+                // A release credited to another same-name ID must never leak into this
+                // artist's catalog through an old cache/provider association.
+                var ownName = BotText.Key(raw.Artist.Name);
+                found = (raw, raw with { Releases = CatalogEditions.Consolidate(raw.Releases.Where(r => r.Artist.Id == raw.Artist.Id || BotText.Key(r.Artist.Name) != ownName)) }); _profileViews[raw.Artist.Id] = found;
             }
             return result with { Value = found.View };
         }
     }
+    public async Task<ArtistIdentity> IdentifyAsync(string name, IEnumerable<string> localAlbums, CatalogArtist? saved, CancellationToken ct, IReadOnlyList<CatalogArtist>? results = null)
+    {
+        name = name.Trim();
+        if (name.Length is < 1 or > 200 || name.Any(char.IsControl)) throw new ArgumentException("Enter an artist name (up to 200 characters).");
+        var albums = ArtistEvidence.Albums(localAlbums);
+        // Saved identities remain useful after the search TTL. Confirm them against
+        // saved albums first, so a cached artist page never waits for a new search.
+        var cachedSearch = results is null ? await ReadAsync<List<CatalogArtist>>("search:" + name.ToUpperInvariant(), ct).ConfigureAwait(false) : null;
+        var all = results ?? cachedSearch?.Value ?? (await SearchAsync(name, false, ct).ConfigureAwait(false)).Value;
+        var candidates = all
+            .Where(a => BotText.Key(a.Name) == BotText.Key(name)).Take(8).ToList();
+        if (candidates.Count == 0) return new(null, all.Take(8).ToList(), [], false, "No exact artist match. Choose the correct spelling/catalog.");
+        if (saved is not null && BotText.Key(saved.Name) == BotText.Key(name) && !candidates.Any(a => a.Id == saved.Id)) candidates.Add(saved);
+        if (candidates.Count == 1) return new(candidates[0], candidates, [], false);
+        var scores = new Dictionary<string, List<string>>();
+        foreach (var candidate in candidates)
+        {
+            ct.ThrowIfCancellationRequested();
+            var profile = await SavedArtistAsync(candidate, ct).ConfigureAwait(false);
+            scores[candidate.Id] = profile is null ? [] : ArtistEvidence.Matches(albums, profile.Value.Releases.Where(r => r.Artist.Id == candidate.Id));
+        }
+        ArtistIdentity? Winner()
+        {
+            var ranked = candidates.OrderByDescending(a => scores.GetValueOrDefault(a.Id)?.Count ?? 0).ToArray();
+            if (ranked.Length == 0) return null;
+            var first = scores.GetValueOrDefault(ranked[0].Id) ?? [];
+            if (!ArtistEvidence.Strong(first) || ranked.Length > 1 && first.Count == (scores.GetValueOrDefault(ranked[1].Id)?.Count ?? 0)) return null;
+            return new(ranked[0], candidates, first, true);
+        }
+        if (Winner() is {} known) return known;
+        // A stored name-only choice is not proof. On first disambiguation, one targeted
+        // album search can link the library's recording to a stable catalog artist ID.
+        foreach (var album in albums.Take(2))
+        {
+            try
+            {
+                var provider = candidates.FirstOrDefault()?.Id.Split(':')[0]; if (provider is null) break;
+                var matches = await IdentityAlbumsAsync(provider, name, album, ct).ConfigureAwait(false);
+                foreach (var candidate in candidates)
+                    if (matches.Value.Any(r => r.Artist.Id == candidate.Id && CatalogEditions.Same(r.Title, album)) && !scores[candidate.Id].Contains(album)) scores[candidate.Id].Add(album);
+                if (Winner() is {} found) return found;
+            }
+            catch (Exception ex) when (Recoverable(ex)) { return new(null, candidates, [], false, "Could not verify this namesake against your library. " + Explain(ex)); }
+        }
+        return new(null, candidates, [], false, "Several artists share this name. The saved selection could not be confirmed from your albums.");
+    }
+    private Task<CatalogResult<List<CatalogRelease>>> IdentityAlbumsAsync(string provider, string name, string title, CancellationToken ct) =>
+        Cached("identity-album:" + provider + ":" + name.ToUpperInvariant() + ":" + CatalogEditions.Key(title), TimeSpan.FromDays(7), false, async () =>
+        {
+            if (provider == "apple")
+            {
+                using var data = await Get(provider, "/search?entity=album&media=music&country=US&limit=50&term=" + Uri.EscapeDataString(name + " " + CatalogEditions.Title(title)), ct);
+                return Results(data.RootElement).Where(a => Text(a, "wrapperType") == "collection").Select(AppleRelease).Where(a => a is not null).Cast<CatalogRelease>().Where(r => BotText.Key(r.Artist.Name) == BotText.Key(name)).ToList();
+            }
+            var query = "artist:\"" + name.Replace("\"", "") + "\" album:\"" + CatalogEditions.Title(title).Replace("\"", "") + "\"";
+            using var result = await Get("deezer", "/search/album?limit=50&q=" + Uri.EscapeDataString(query), ct);
+            return Data(result.RootElement).Where(a => a.TryGetProperty("artist", out _)).Select(a => DeezerRelease(a, new("", ""))).Where(a => a is not null).Cast<CatalogRelease>().Where(r => BotText.Key(r.Artist.Name) == BotText.Key(name)).ToList();
+        }, ct);
 
-    public Task<CatalogResult<CatalogAlbum>> AlbumAsync(CatalogRelease album, bool refresh, CancellationToken ct)
+    public async Task<CatalogResult<CatalogAlbum>> AlbumAsync(CatalogRelease album, bool refresh, CancellationToken ct)
     {
         var (provider, id) = Split(album.Id);
-        return Cached("album:" + album.Id, TimeSpan.FromDays(7), refresh, async () =>
+        var answer = await Cached("album:" + album.Id, TimeSpan.FromDays(7), refresh, async () =>
         {
             if (provider == "deezer")
             {
@@ -143,7 +205,9 @@ internal sealed class ArtistCatalog : IDisposable
             if (release is null) throw Invalid("The album is unavailable in Apple's US catalog.");
             var rows = items.Where(t => Id(t, "collectionId", "apple") == album.Id).Select(AppleSong).Where(t => t is not null).Cast<CatalogSong>().OrderBy(t => t.Disc).ThenBy(t => t.Number).ToList();
             return new CatalogAlbum(release, rows, release.Count > 0 && release.Count != rows.Count ? "The catalog's track count differs from the returned songs (some entries may be unavailable or non-audio). Download all is unavailable." : "");
-        }, ct);
+        }, ct).ConfigureAwait(false);
+        if (answer.Value.Release.Artist.Id != album.Artist.Id) throw Invalid("This release belongs to a different artist ID. Refresh the artist catalog; no namesake substitution was made.");
+        return answer;
     }
 
     private async Task<CatalogResult<T>> Cached<T>(string key, TimeSpan age, bool refresh, Func<Task<T>> fetch, CancellationToken ct)
@@ -266,7 +330,7 @@ internal sealed class ArtistCatalog : IDisposable
     private static string? Id(JsonElement value, string key, string provider) => Number(value, key) is > 0 and var n ? provider + ":" + n : null;
     private static IEnumerable<JsonElement> Data(JsonElement root) => root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array ? data.EnumerateArray().ToArray() : throw Invalid("The catalog's page has no result list.");
     private static IEnumerable<JsonElement> Results(JsonElement root) => root.TryGetProperty("results", out var data) && data.ValueKind == JsonValueKind.Array ? data.EnumerateArray().ToArray() : throw Invalid("Apple returned no result list.");
-    private static CatalogArtist? DeezerArtist(JsonElement a) => Id(a, "id", "deezer") is {} id && Text(a, "name") is { Length: > 0 } name ? new(id, name) : null;
+    private static CatalogArtist? DeezerArtist(JsonElement a) => Id(a, "id", "deezer") is {} id && Text(a, "name") is { Length: > 0 } name ? new(id, name, Picture: Text(a, "picture_medium")) : null;
     private static CatalogArtist? AppleArtist(JsonElement a) => Id(a, "artistId", "apple") is {} id && Text(a, "artistName") is { Length: > 0 } name ? new(id, name, Text(a, "primaryGenreName")) : null;
     private static CatalogRelease? DeezerRelease(JsonElement a, CatalogArtist fallback)
     {

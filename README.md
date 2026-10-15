@@ -19,6 +19,12 @@ waits for an unused popular-song lookup. A subtle native loading indicator expla
 network loads; navigating away cancels that artist's request. Memory caches are bounded,
 disk reads run off the UI thread, and provider pacing/proxy rules remain in effect.
 
+Version **2.8.3** separates same-name artists using catalog IDs and albums in your library.
+Old name-only selections are checked again; opening another namesake from search affects
+that visit, without replacing the identity used by your local artist page. Artist search
+shows round profile pictures and genres instead of raw provider IDs. Pictures load only for
+visible results, use the existing proxy route and cache, and fall back to initials.
+
 Version 2.6 adds a **Playlists** tab: paste several Spotify playlists, match songs across
 all local library folders, and create ordered Noctis playlists. Unique missing recordings wait
 in the shared queue until you start them; new downloads fill their original positions.
@@ -103,7 +109,9 @@ was closed in the middle of it is removed at the next start.
 Open a normal Noctis artist page. **Albums**, **Singles & EPs**, and **Appears On** keep their
 native layout and gain releases returned by the catalog. Local-only releases remain. To find
 an artist you do not own, open Finder → **Artists**, search, and choose **Open in Noctis**.
-If multiple artists share a name, choose the genre/provider identity once; that choice is saved.
+If several artists share a name, known local albums identify the matching catalog when possible.
+Otherwise, choose by picture and genre; that explicit local-page choice is saved. Finder search
+visits remain separate. Small artists are never rejected just for having fewer listeners.
 
 Open a release to see its ordered tracks on the native album page. Owned tracks keep native
 playback; missing tracks are slightly muted and offer **Download now** or **Queue download**.

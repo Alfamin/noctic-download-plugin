@@ -87,6 +87,13 @@ internal static class NativeCatalogBridge
         Set(album, "Tracks", List(trackType, [marker])); return album;
     }
     internal static IReadOnlyList<object> LocalTracks(object main) => Values(GetLibrary(main).GetType().GetProperty("AllTracks")?.GetValue(GetLibrary(main)) ?? Get(GetLibrary(main), "Tracks"));
+    internal static IReadOnlyList<string> ArtistAlbums(object main, string name)
+    {
+        if (Get(main, "CurrentView") is {} view && BotText.Key(Get(view, "ArtistName") as string) == BotText.Key(name))
+            return Values(view.GetType().GetField("_allReleases", Private)?.GetValue(view)).OrderByDescending(a => Values(Get(a, "Tracks")).Count).Select(a => Get(a, "Name") as string ?? "").ToArray();
+        return Values(Get(GetLibrary(main), "Albums")).Where(a => BotText.Key(Get(a, "Artist") as string) == BotText.Key(name))
+            .OrderByDescending(a => Values(Get(a, "Tracks")).Count).Select(a => Get(a, "Name") as string ?? "").ToArray();
+    }
     private static object GetLibrary(object main) => main.GetType().GetField("_library", Private)?.GetValue(main) ?? throw Unsupported("local library");
     internal static object OpenAlbum(object main, object tile, CatalogAlbum metadata, IReadOnlyDictionary<string, DiscoveryMatch> matches)
     {

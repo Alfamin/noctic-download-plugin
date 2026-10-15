@@ -23,8 +23,13 @@ album tags open the full catalog listing, and album header covers now load and s
 react to navigation immediately, reuse cached metadata/covers and show a small loading bar.
 First visits still need your connection; switching artists cancels the previous page's request.
 
+**2.8.3:** artist search shows profile pictures and genres, without raw Apple/Deezer IDs.
+Same-name artists stay separate. Your local albums help choose the right catalog, and old
+selections are checked again. Pictures load through your proxy, are cached, and show initials
+if unavailable. Opening another namesake from search won't change your local artist's choice.
+
 For an artist outside your library: Finder → **Artists** → search → **Open in Noctis**.
-If several artists share the same name, pick the right genre/identity once. Download progress
+If your local albums cannot distinguish namesakes, choose by picture and genre. Download progress
 is in Finder → **Queue**. Noctis must scan downloaded songs before they become playable.
 The native **Add to Queue** button still adds owned songs to the playback queue.
 

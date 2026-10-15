@@ -25,6 +25,14 @@ internal static class LiveDiscoveryTest
             var exact = search.Value.Where(a => BotText.Key(a.Name) == BotText.Key(name) && (pieces.Length == 1 || a.Id == pieces[1])).ToArray();
             Check.Equal(1, exact.Length, "live metadata: one exact artist identity for " + name);
             if (exact.Length != 1) continue;
+            if (Environment.GetEnvironmentVariable("FMF_IDENTITY_ALBUMS") is { Length: > 0 } evidence)
+            {
+                var previous = Environment.GetEnvironmentVariable("FMF_IDENTITY_OLD_ID");
+                var identity = await catalog.IdentifyAsync(name, evidence.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), previous is null ? null : new(previous, name), stop.Token, search.Value);
+                Check.Equal(exact[0].Id, identity.Artist?.Id, "live metadata: local album evidence selects the intended namesake");
+                Check.True(identity.LibraryMatch, "live metadata: identity is supported by the artist's own releases");
+                Console.WriteLine($"  IDENTITY {previous ?? "unselected"} → {identity.Artist?.Id}; {identity.Albums.Count} matching album(s).");
+            }
             var elapsed = System.Diagnostics.Stopwatch.StartNew();
             var artist = await catalog.ArtistAsync(exact[0], false, stop.Token);
             Console.WriteLine($"  PERF  {(artist.Cached ? "cached" : "network")} artist metadata ready: {elapsed.Elapsed.TotalMilliseconds:F1} ms");
@@ -43,6 +51,13 @@ internal static class LiveDiscoveryTest
                 Check.True(art is not null && File.Exists(art), "live metadata: album cover saved through the selected proxy route");
                 Check.Equal(art, await catalog.ArtworkAsync(album.Value.Release.Artwork, stop.Token), "live metadata: repeated album cover uses cached file");
                 if (art is not null) Console.WriteLine("  Cover: " + new FileInfo(art).Length + " bytes in isolated metadata cache.");
+            }
+            if (Environment.GetEnvironmentVariable("FMF_DISCOVERY_PORTRAIT") == "1")
+            {
+                var portrait = await catalog.PortraitAsync(exact[0], stop.Token);
+                Check.True(portrait is not null && File.Exists(portrait), "live metadata: exact artist portrait loads through selected proxy route");
+                Check.Equal(portrait, await catalog.PortraitAsync(exact[0], stop.Token), "live metadata: repeated artist portrait uses cached file");
+                if (portrait is not null) Console.WriteLine("  Portrait: " + new FileInfo(portrait).Length + " bytes in isolated metadata cache.");
             }
         }
         Console.WriteLine($"{Check.Passed} ok, {Check.Failed} wrong. Public metadata only; zero Telegram requests, zero audio downloads, zero library writes.");

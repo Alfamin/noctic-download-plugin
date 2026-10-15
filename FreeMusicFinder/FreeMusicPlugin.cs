@@ -160,7 +160,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     }
 
     private ArtistCatalog CreateCatalog() => _catalogFactory(Path.Combine(_host!.DataDirectory, "artist-catalog"), _proxy);
-    private DiscoveryView CreateDiscovery() => new(() => _catalog ?? throw new InvalidOperationException("Free Music Finder has stopped."), artist => { _artistPages!.OpenArtist(artist); _window?.Close(); });
+    private DiscoveryView CreateDiscovery() => new(() => _catalog ?? throw new InvalidOperationException("Free Music Finder has stopped."), artist => { _artistPages!.OpenArtist(artist); _window?.Close(); }, name => _artistPages?.LocalAlbums(name) ?? []);
 
     private void ShowWindow(string? query, bool discover = false)
     {

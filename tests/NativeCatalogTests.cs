@@ -226,6 +226,34 @@ internal static class NativeCatalogTests
         var returnView = (UserControl)Activator.CreateInstance(artistView.GetType())!; returnView.DataContext = artistVm; shell.CurrentView = artistVm; savedWindow.Content = returnView;
         Check.Until(() => returnView.GetVisualDescendants().OfType<TextBlock>().Any(t => t.Text?.Contains("cached catalog") == true) && Values(Get(artistVm, "Releases")).Count == 2, "returning to a cancelled artist immediately restores its saved releases and resumes refresh");
         savedWindow.Close(); savedPages.Dispose();
+
+        Check.Section("native artist identity: legacy namesake repair and scoped search visits");
+        var secondAlbum = Activator.CreateInstance(albumType)!; Set(secondAlbum, "Id", Guid.NewGuid()); Set(secondAlbum, "Name", "Orbit - Single"); Set(secondAlbum, "Artist", "North Star"); Set(secondAlbum, "TrackCount", 1); Set(secondAlbum, "Tracks", List(trackType, [track])); originalAlbums.Add(secondAlbum);
+        var identityFolder = Check.NewFolder("native-artist-identity");
+        foreach (var file in Directory.GetFiles(Path.Combine(folder, "catalog"), "*.json")) File.Copy(file, Path.Combine(identityFolder, Path.GetFileName(file)));
+        var wrongArtist = new CatalogArtist("deezer:404", "North Star", "Dance");
+        ArtistIdentityTests.Seed(identityFolder, "search:NORTH STAR", new[] { wrongArtist, DiscoveryTests.Star });
+        ArtistIdentityTests.Seed(identityFolder, "artist:" + wrongArtist.Id, new CatalogProfile(wrongArtist, [], [new("deezer:505", "Late Night Sessions", wrongArtist, "2026-01-01", "album", 10)]));
+        var choicesPath = Path.Combine(identityFolder, "artist-choices.json");
+        File.WriteAllText(choicesPath, System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, CatalogArtist> { ["North Star"] = wrongArtist }));
+        using var identityCatalog = DiscoveryTests.Catalog(identityFolder, new() { Offline = true });
+        object NewArtist(string name) => artistType.GetConstructors().Single().Invoke(new object?[] { name, library, player, null, null, null, null, null, null, null });
+        var correctVm = NewArtist("North Star"); shell.CurrentView = correctVm; shell.ArtistFactory = NewArtist;
+        var correctView = (UserControl)Activator.CreateInstance(artistView.GetType())!; correctView.DataContext = correctVm;
+        var identityWindow = new Window { Content = correctView, Width = 1280, Height = 950 }; identityWindow.Show();
+        using var identityPages = new NativeCatalogPages(() => identityCatalog, actions, logs.Add, () => true, () => shell, choicesPath, () => identityWindow);
+        Check.Until(() => correctView.GetVisualDescendants().OfType<TextBlock>().Any(t => t.Text?.Contains("online releases") == true), "native local artist page revalidates an old namesake selection");
+        var confirmedChoices = File.ReadAllText(choicesPath);
+        Check.True(confirmedChoices.Contains("deezer:42") && !confirmedChoices.Contains("deezer:404"), "local album evidence repairs the wrong legacy pin without user editing settings");
+        Check.True(!Values(Get(correctVm, "Releases")).Any(a => Equals(Get(a, "Name"), "Late Night Sessions")), "wrong namesake album stays out of native local artist sections");
+        identityPages.OpenArtist(wrongArtist); var namesakeVm = shell.CurrentView!;
+        Check.Equal(confirmedChoices, File.ReadAllText(choicesPath), "opening a same-name search result never overwrites the local artist selection");
+        var namesakeView = (UserControl)Activator.CreateInstance(artistView.GetType())!; namesakeView.DataContext = namesakeVm; identityWindow.Content = namesakeView;
+        Check.Until(() => Values(Get(namesakeVm, "Releases")).Any(a => Equals(Get(a, "Name"), "Late Night Sessions")), "explicit namesake search still opens that particular artist for this visit");
+        Check.Equal(confirmedChoices, File.ReadAllText(choicesPath), "visited namesake remains separate after its catalog finishes loading");
+        shell.CurrentView = correctVm; identityWindow.Content = correctView; identityPages.Scan();
+        Check.True(!Values(Get(correctVm, "Releases")).Any(a => Equals(Get(a, "Name"), "Late Night Sessions")), "returning to the library artist keeps the corrected catalog");
+        identityWindow.Close(); identityPages.Dispose(); ((IDisposable)correctVm).Dispose(); ((IDisposable)namesakeVm).Dispose(); shell.ArtistFactory = null; originalAlbums.Remove(secondAlbum);
         ((IDisposable)albumVm).Dispose(); ((IDisposable)artistVm).Dispose();
         if (player is IDisposable disposable) disposable.Dispose();
     }
@@ -235,6 +263,8 @@ internal static class NativeCatalogTests
     {
         private readonly object _library = library; public object Player { get; } = player;
         private object? _current; public object? CurrentView { get => _current; set { _current = value; PropertyChanged?.Invoke(this, new(nameof(CurrentView))); } }
+        public Func<string, object>? ArtistFactory { get; set; }
+        private void OpenArtistDiscography(string name) => CurrentView = ArtistFactory!(name);
         public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
     }
     private static void Save(Window window, string? folder, string name)
