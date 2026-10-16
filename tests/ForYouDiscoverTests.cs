@@ -230,8 +230,12 @@ internal static class ForYouDiscoverTests
         };
         using var catalog = DiscoveryTests.Catalog(Path.Combine(folder, "catalog"), http);
         var library = new SpotifyPlaylistTests.Library();
-        var source = new ForYouSource(() => catalog, null, _ => [], library, folder, Path.Combine(folder, "hidden.json"));
-        using var view = new DiscoveryView(() => catalog, _ => { }, null, null, null, source);
+        int fetched = 0;
+        BotTrack Track(MusicRequest r) => new(r.Title, r.Artist, r.Duration, r.Title + r.Identity.GetHashCode(), async (output, _, ct) => { fetched++; await output.WriteAsync(new byte[] { 1 }, ct); return "mp3"; }) { Request = r };
+        using var downloads = new Downloads(_ => { }); downloads.SetPaused(true);
+        var actions = new DiscoveryActions(library, downloads, Track, () => Path.Combine(folder, "saved"), () => true);
+        var source = new ForYouSource(() => catalog, actions, _ => [], library, folder, Path.Combine(folder, "hidden.json"));
+        using var view = new DiscoveryView(() => catalog, _ => { }, null, actions, null, source);
         var window = new Window { Content = view, Width = 820, Height = 740 }; FinderTheme.Apply(window); window.Show();
         Check.Until(() => Text(view).Any(t => t.StartsWith("3 songs you don't have yet")), "For you loads by itself before any search");
         Check.True(view.ForYouMode && Text(view).Contains("Songs for you") && Text(view).Any(t => t.Contains("Because you play North Star")) && Text(view).Any(t => t.Contains("More from North Star")),
@@ -240,8 +244,21 @@ internal static class ForYouDiscoverTests
         Check.Equal(3, notForMe.Count, "every suggested song can be dismissed");
         notForMe[0].RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Dispatcher.UIThread.RunJobs();
         Check.True(Text(view).Any(t => t.StartsWith("Got it")) && view.GetVisualDescendants().OfType<Button>().Count(b => Equals(b.Content, "Not for me")) == 2, "'Not for me' removes the song at once");
+        Button Find(string label) => view.GetVisualDescendants().OfType<Button>().First(b => Equals(b.Content, label) && b.IsEnabled);
+        Find("Queue download").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check.Until(() => downloads.Active.Count == 1, "Queue download on a For you song puts it in the download queue");
+        view.SelectFilter("Download bots"); view.SelectFilter("For you"); Dispatcher.UIThread.RunJobs();
+        Find("Queue download").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check.Until(() => downloads.Active.Count == 2, "after visiting another tab and coming back, For you songs can still be queued");
+        Find("Download now").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check.Until(() => fetched == 1, "Download now on a For you song downloads it");
         view.Search("North Star");
         Check.True(!view.ForYouMode, "typing a search leaves For you for the search results");
+        var chip = view.GetVisualDescendants().OfType<Button>().First(b => b.Classes.Contains("finder-primary"));
+        ((Avalonia.Controls.IPseudoClasses)chip.Classes).Add(":pointerover"); Dispatcher.UIThread.RunJobs();
+        var inside = chip.GetVisualDescendants().OfType<Avalonia.Controls.Presenters.ContentPresenter>().FirstOrDefault(p => p.Name == "PART_ContentPresenter");
+        Check.True(inside?.Background is Avalonia.Media.ISolidColorBrush under && chip.Background is Avalonia.Media.ISolidColorBrush own && under.Color == own.Color,
+            "the chosen filter keeps its colour while the pointer is still on it");
         window.Close();
     }
 

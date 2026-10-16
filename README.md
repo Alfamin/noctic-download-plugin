@@ -3,6 +3,8 @@
 Finds songs and imports Spotify/Deezer playlists through Music Hunters and DeezLoad using
 your own Telegram account, from inside [Noctis](https://github.com/heartached/Noctis).
 
+Version **2.10.1** fixes For you's **Download now** and **Queue download**, which did nothing after you had visited another tab, and the chosen filter (All, Artists…) now keeps its colour while the pointer is still on it.
+
 Version **2.10.0** adds **For you**. Before you search, the Search tab shows songs you don't have yet, picked from the
 artists you play. It uses what you finish and what you skip early, from Noctis's history and True Shuffle's listening
 log, and how many songs of an artist you own. Each song says why it is there ("More from J. Cole", "Because you play

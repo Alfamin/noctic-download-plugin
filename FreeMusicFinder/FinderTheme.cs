@@ -31,7 +31,16 @@ internal static class FinderTheme
         primary.Setters.Add(new Setter(TemplatedControl.ForegroundProperty, Brushes.White));
         primary.Setters.Add(new Setter(TemplatedControl.FontWeightProperty, FontWeight.SemiBold));
         window.Styles.Add(primary);
-        var card = new Style(s => s.OfType<Border>().Class("finder-card"));
+        // The theme paints a hovered or pressed button's inside itself, which hid the chosen chip's colour until the
+        // pointer left it: the chosen one keeps its colour under the pointer too.
+        foreach (var state in new[] { ":pointerover", ":pressed" })
+        {
+            var held = new Style(s => s.OfType<Button>().Class("finder-primary").Class(state).Template().OfType<Avalonia.Controls.Presenters.ContentPresenter>().Name("PART_ContentPresenter"));
+            held.Setters.Add(new Setter(Avalonia.Controls.Presenters.ContentPresenter.BackgroundProperty, Resource("FinderAccent")));
+            held.Setters.Add(new Setter(Avalonia.Controls.Presenters.ContentPresenter.ForegroundProperty, Brushes.White));
+            window.Styles.Add(held);
+        }
+        var card =new Style(s => s.OfType<Border>().Class("finder-card"));
         card.Setters.Add(new Setter(Border.BackgroundProperty, Resource("FinderPanel")));
         card.Setters.Add(new Setter(Border.BorderBrushProperty, Resource("FinderLine")));
         card.Setters.Add(new Setter(Border.BorderThicknessProperty, new Thickness(1)));

@@ -9,6 +9,8 @@ You need: Noctis 1.5.3 or newer, a Telegram account, and the file
 
 ## 1. Install the zip
 
+**2.10.1** fixes For you's **Download now** and **Queue download**, which did nothing after you had visited another tab, and the chosen filter (All, Artists…) now keeps its colour while the pointer is still on it.
+
 **New in 2.10.0: For you.** Before you search, the Search tab shows songs you don't have yet, picked from the
 artists you play. It uses what you finish and what you skip early, from Noctis's history and True Shuffle's listening
 log, and how many songs of an artist you own. Each song says why it is there ("More from J. Cole", "Because you play

@@ -79,7 +79,17 @@ internal sealed class DiscoveryView : UserControl, IDisposable
     {
         if (_forYouSource is null || _disposed) return;
         _forYouStarted = true;
-        if (_forYou is not null && !refresh) { Render(); return; }
+        if (_forYou is not null && !refresh)
+        {
+            // Back from another tab, whose leaving cancelled the page's token: the buttons need a live one again.
+            if (_search is null || _search.IsCancellationRequested) { _search?.Dispose(); _search = new CancellationTokenSource(); }
+            var shown = _search;
+            Render();
+            if (_actions is null || _forYou.Songs.Count == 0) return;
+            try { var matches = await _actions.MatchAsync(CurrentSongs().Select(s => s.Song), shown.Token); if (!_disposed && ReferenceEquals(shown, _search) && ForYouMode) { _matches = matches; RefreshSongs(); } }
+            catch (Exception) { /* the next download action rechecks */ }
+            return;
+        }
         _search?.Cancel(); _search?.Dispose(); var source = _search = new CancellationTokenSource();
         ClearCards(); _results.Children.Clear(); _scroll.Offset = default; _loading.IsVisible = true;
         _status.Text = "Learning your taste…";
