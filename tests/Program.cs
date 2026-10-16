@@ -15,6 +15,13 @@ if (Environment.GetEnvironmentVariable("FMF_SEARCH_PREVIEW_QUERY") is { Length: 
     return Check.Failed;
 }
 
+// Explicit opt-in: For you on the real (read-only) listening history and library, against the public catalog.
+if (Environment.GetEnvironmentVariable("FMF_FORYOU_LIVE") is { Length: > 0 } forYouData)
+{
+    try { await LiveForYouTest.RunAsync(forYouData); } finally { Console.WriteLine($"{Check.Passed} ok, {Check.Failed} wrong"); }
+    return Check.Failed;
+}
+
 // Explicit public catalog metadata probe. No Telegram connection, audio download or live library write.
 if (Environment.GetEnvironmentVariable("FMF_DISCOVERY_LIVE") is { Length: > 0 } artists)
 {
@@ -63,6 +70,7 @@ try
     await ArtistPortraitTests.RunAsync();
     await ArtworkQualityTests.RunAsync();
     await DiscoveryNetworkTests.RunAsync();
+    await ForYouDiscoverTests.RunAsync();
     await LivePlaylistTest.RunAsync(Environment.GetEnvironmentVariable("FMF_SPOTIFY_PLAYLIST"), Environment.GetEnvironmentVariable("FMF_LIBRARY_SNAPSHOT"), Environment.GetEnvironmentVariable("FMF_LIVE_REPORT"));
 
     var pictures = Environment.GetEnvironmentVariable("FMF_PICTURES");
@@ -76,6 +84,7 @@ try
     NativeCatalogTests.Run(Environment.GetEnvironmentVariable("FMF_NOCTIS_APP"), pictures);
     ArtistPortraitTests.RunUi(pictures);
     UnifiedSearchTests.RunUi(pictures);
+    ForYouDiscoverTests.RunUi();
 }
 catch (Exception ex)
 {

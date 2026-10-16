@@ -39,6 +39,8 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     private volatile string _proxy = "";
     private volatile bool _allowMp3 = true;
     private readonly Func<string, string, ArtistCatalog> _catalogFactory;
+    private ForYouSource? _forYou;
+    private SimilarArtists? _similar;
 
     public FreeMusicPlugin() : this((folder, proxy) => new ArtistCatalog(folder, PlaylistCatalog.MetadataHandler(proxy))) { }
     internal FreeMusicPlugin(Func<string, string, ArtistCatalog> catalogFactory) => _catalogFactory = catalogFactory;
@@ -65,9 +67,12 @@ public sealed class FreeMusicPlugin : INoctisPlugin
         _playlists = new SpotifyPlaylists(Path.Combine(host.DataDirectory, "spotify-playlists.json"), new PlaylistLibrary(), _downloads, _bot.Track,
             new PlaylistCatalog(PlaylistCatalog.MetadataHandler(_proxy, Log)));
         _catalog = CreateCatalog();
+        _similar = CreateSimilar();
         _discoveryActions = new DiscoveryActions(new PlaylistLibrary(), _downloads, _bot.Track,
             () => Downloader.Folder(host.Settings.GetString(DownloadFolderKey), host.DataDirectory), () => _telegram?.IsLoggedIn == true);
         _artistPages = new NativeCatalogPages(() => _catalog!, _discoveryActions, Log, () => _host?.Settings.GetBool("artistCatalogOnPages", true) == true, choicesPath: Path.Combine(host.DataDirectory, "artist-catalog", "artist-choices.json"));
+        _forYou = new ForYouSource(() => _catalog ?? throw new InvalidOperationException("Free Music Finder has stopped."), _discoveryActions,
+            name => _artistPages?.LocalAlbums(name) ?? [], new PlaylistLibrary(), NoctisDataOf(host.DataDirectory), Path.Combine(host.DataDirectory, "for-you-hidden.json"), () => _similar);
         _transfers.Changed += Announce;
         _downloads.Finished += Announce;
 
@@ -106,7 +111,8 @@ public sealed class FreeMusicPlugin : INoctisPlugin
         _window = null;
         _artistPages?.Dispose(); _artistPages = null;
         _catalog?.Dispose(); _catalog = null;
-        _discoveryActions = null;
+        _discoveryActions = null; _forYou = null;
+        _similar?.Dispose(); _similar = null;
         _playlists?.Dispose(); _playlists = null;
         if (_downloads is not null) _downloads.Finished -= Announce;
         _downloads?.Dispose();
@@ -132,6 +138,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
             UpdatePlaylistProxy();
             _catalog?.Dispose();
             _catalog = CreateCatalog();
+            _similar?.Dispose(); _similar = CreateSimilar();
         }
         else if (key == ShortcutKey) ApplyShortcut();
         else if (key == AllowMp3Key) _allowMp3 = _host?.Settings.GetBool(AllowMp3Key, true) ?? true;
@@ -160,9 +167,18 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     }
 
     private ArtistCatalog CreateCatalog() => _catalogFactory(Path.Combine(_host!.DataDirectory, "artist-catalog"), _proxy);
+    private SimilarArtists CreateSimilar() => new(Path.Combine(_host!.DataDirectory, "artist-catalog"), PlaylistCatalog.MetadataHandler(_proxy, Log));
     private DiscoveryView CreateDiscovery() => new(() => _catalog ?? throw new InvalidOperationException("Free Music Finder has stopped."),
         artist => { _artistPages!.OpenArtist(artist); _window?.Close(); }, name => _artistPages?.LocalAlbums(name) ?? [],
-        _discoveryActions, async (album, ct) => { await _artistPages!.OpenAlbumAsync(album, ct); _window?.Close(); });
+        _discoveryActions, async (album, ct) => { await _artistPages!.OpenAlbumAsync(album, ct); _window?.Close(); }, _forYou);
+
+    /// <summary>Noctis's own data folder (two above this plugin's), when the plugin's data sits where Noctis puts it.</summary>
+    private static string? NoctisDataOf(string pluginData)
+    {
+        var mine = Path.GetFullPath(pluginData).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var parent = Path.GetDirectoryName(mine);
+        return parent is not null && string.Equals(Path.GetFileName(parent), "plugin-data", StringComparison.OrdinalIgnoreCase) ? Path.GetDirectoryName(parent) : null;
+    }
 
     private void ShowWindow(string? query, bool discover = false)
     {

@@ -16,6 +16,10 @@ internal sealed class DiscoveryView : UserControl, IDisposable
     private readonly Func<string, IReadOnlyList<string>>? _localAlbums;
     private readonly Func<CatalogRelease, CancellationToken, Task>? _openAlbum;
     private readonly DiscoveryActions? _actions;
+    private readonly ForYouSource? _forYouSource;
+    private DiscoverResult? _forYou;
+    private Dictionary<string, string> _because = new();
+    private bool _forYouStarted;
     private readonly TextBlock _status = FinderTheme.Caption("Search artists, songs and albums above. Browsing does not need Telegram.");
     private readonly StackPanel _results = new() { Spacing = 8 };
     private readonly ScrollViewer _scroll = new();
@@ -38,11 +42,11 @@ internal sealed class DiscoveryView : UserControl, IDisposable
     public bool BotMode => _filter == "Download bots";
     public string Query => _query;
     public DiscoveryView(Func<ArtistCatalog> catalog, Action<CatalogArtist> open, Func<string, IReadOnlyList<string>>? localAlbums = null,
-        DiscoveryActions? actions = null, Func<CatalogRelease, CancellationToken, Task>? openAlbum = null)
+        DiscoveryActions? actions = null, Func<CatalogRelease, CancellationToken, Task>? openAlbum = null, ForYouSource? forYou = null)
     {
-        _catalog = catalog; _open = open; _localAlbums = localAlbums; _actions = actions; _openAlbum = openAlbum;
+        _catalog = catalog; _open = open; _localAlbums = localAlbums; _actions = actions; _openAlbum = openAlbum; _forYouSource = forYou;
         var filters = new WrapPanel();
-        foreach (var label in new[] { "All", "Artists", "Songs", "Albums", "Download bots" })
+        foreach (var label in (forYou is null ? new[] { "All" } : new[] { "For you", "All" }).Concat(new[] { "Artists", "Songs", "Albums", "Download bots" }))
         {
             var button = new Button { Content = label, Margin = new Thickness(0, 0, 6, 5) };
             button.Classes.Add("finder-chip");
@@ -58,15 +62,85 @@ internal sealed class DiscoveryView : UserControl, IDisposable
         welcome.Children.Add(new TextBlock { Text = "What do you want to listen to?", FontSize = 26, FontWeight = FontWeight.SemiBold, TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap });
         var hint = FinderTheme.Caption("Find artists, explore albums, or search a song and its artist. Your library and downloads stay together."); hint.TextAlignment = TextAlignment.Center; welcome.Children.Add(hint);
         _results.Children.Add(welcome);
+        if (forYou is not null)
+        {
+            // Before any search, show what the listener does not have yet. Loading starts once the page is on screen.
+            _filter = "For you";
+            AttachedToVisualTree += (_, _) => { if (!_forYouStarted && _filter == "For you" && _query.Length == 0) LoadForYou(false); };
+        }
         UpdateFilters();
         if (_actions is not null) _actions.Downloads.Changed += DownloadChanged;
+    }
+    public bool ForYouMode => _filter == "For you";
+    /// <summary>The songs on screen: the search's, or For you's.</summary>
+    private List<CatalogSearchSong> CurrentSongs() => ForYouMode ? _forYou?.Songs.Select(s => s.Track).ToList() ?? [] : _songs;
+
+    private async void LoadForYou(bool refresh)
+    {
+        if (_forYouSource is null || _disposed) return;
+        _forYouStarted = true;
+        if (_forYou is not null && !refresh) { Render(); return; }
+        _search?.Cancel(); _search?.Dispose(); var source = _search = new CancellationTokenSource();
+        ClearCards(); _results.Children.Clear(); _scroll.Offset = default; _loading.IsVisible = true;
+        _status.Text = "Learning your taste…";
+        bool Current() => !_disposed && ReferenceEquals(source, _search);
+        var progress = new Progress<string>(text => { if (Current() && ForYouMode) _status.Text = text; });
+        try
+        {
+            var result = await _forYouSource.BuildAsync(refresh, progress, source.Token);
+            if (!Current()) return;
+            _forYou = result;
+            _because = result.Songs.GroupBy(s => s.Track.Song.Id).ToDictionary(g => g.Key, g => g.First().Because);
+            _status.Text = result.Notice.Length > 0 ? result.Notice
+                : $"{result.Songs.Count} songs you don't have yet, picked from the artists you play. Nothing downloads until you choose.";
+            if (ForYouMode) Render();
+            if (_actions is not null && result.Songs.Count > 0)
+            {
+                _matches = await _actions.MatchAsync(CurrentSongs().Select(s => s.Song), source.Token);
+                if (Current()) RefreshSongs();
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { if (Current() && ForYouMode) _status.Text = "For you: " + ArtistCatalog.Explain(ex); }
+        finally { if (Current()) _loading.IsVisible = false; }
+    }
+
+    private void RenderForYou()
+    {
+        var header = new Grid { ColumnDefinitions = new("*,Auto"), Margin = new Thickness(0, 18, 0, 5) };
+        header.Children.Add(new TextBlock { Text = "Songs for you", FontSize = 20, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center });
+        var refresh = new Button { Content = "Refresh", FontSize = 12 }; refresh.Classes.Add("finder-quiet");
+        ToolTip.SetTip(refresh, "Pick again from what you have played since, without the songs you downloaded or dismissed.");
+        refresh.Click += (_, _) => LoadForYou(true);
+        Grid.SetColumn(refresh, 1); header.Children.Add(refresh); _results.Children.Add(header);
+        if (_forYou is not { } forYou) return;
+        foreach (var song in forYou.Songs)
+            Add(new FinderHit("Songs", song.Track.Song.Id, song.Track.Song.Title, song.Because, song.Score, Track: song.Track), "row");
+        if (forYou.Artists.Count > 0)
+        {
+            Heading("Artists for you");
+            Shelf(forYou.Artists.Select(a => new FinderHit("Artists", a.Artist.Id, a.Artist.Name, a.Because, 0, Artist: a.Artist)));
+        }
+    }
+
+    private void NotForMe(CatalogSearchSong track, Border card)
+    {
+        if (_forYouSource is null || _forYou is null) return;
+        bool artistToo = _forYouSource.Hidden.Hide(track.Song);
+        _forYouSource.Forget();
+        var leaving = artistToo && track.Song.Artists.FirstOrDefault() is { } artist ? artist.Id : null;
+        _forYou = _forYou with { Songs = _forYou.Songs.Where(s => s.Track.Song.Id != track.Song.Id && (leaving is null || s.Track.Song.Artists.FirstOrDefault()?.Id != leaving)).ToList() };
+        if (card.Parent is Panel parent) parent.Children.Remove(card);
+        _status.Text = artistToo ? $"Got it: no more {track.Song.Artists[0].Name} in For you." : "Got it: that song won't be suggested again.";
+        if (leaving is not null) Render();
     }
     public void SelectFilter(string filter)
     {
         if (_disposed || !_filters.ContainsKey(filter) || _filter == filter) return;
         _filter = filter; UpdateFilters(); _scroll.Offset = default;
         if (BotMode) { _search?.Cancel(); _loading.IsVisible = false; if (_query.Length > 0) BotSearchRequested?.Invoke(); }
-        else { CatalogSelected?.Invoke(); if (_search?.IsCancellationRequested == true && _query.Length > 0) Search(_query); else Render(); }
+        else if (ForYouMode) { CatalogSelected?.Invoke(); LoadForYou(false); }
+        else { CatalogSelected?.Invoke(); if ((_search?.IsCancellationRequested == true || _forYouStarted && _hits.Count == 0) && _query.Length > 0) Search(_query); else Render(); }
     }
     private void UpdateFilters() { foreach (var (name, button) in _filters) button.Classes.Set("finder-primary", name == _filter); }
     public void ShowBots(Control content, string? query = null)
@@ -79,7 +153,7 @@ internal sealed class DiscoveryView : UserControl, IDisposable
     public async void Search(string name)
     {
         name = name.Trim(); if (_disposed || name.Length == 0) return;
-        _query = name; if (BotMode) _filter = "All"; UpdateFilters();
+        _query = name; if (BotMode || ForYouMode) _filter = "All"; UpdateFilters();
         _search?.Cancel(); _search?.Dispose(); var source = _search = new CancellationTokenSource();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(source.Token); deadline.CancelAfter(TimeSpan.FromSeconds(90)); var ct = deadline.Token;
         ClearCards(); _results.Children.Clear(); _scroll.Offset = default;
@@ -146,9 +220,15 @@ internal sealed class DiscoveryView : UserControl, IDisposable
     private void Render()
     {
         if (_disposed || BotMode) return;
-        _hits = SearchRanking.Build(FinderQuery.Parse(_query), _artists, _songs, _albums, _identity);
         foreach (var item in _cards.Values) if (item.Card.Parent is Panel parent) parent.Children.Remove(item.Card);
         _results.Children.Clear();
+        if (ForYouMode)
+        {
+            RenderForYou();
+            LayoutSongActions(); RefreshSongs(); Dispatcher.UIThread.Post(LoadPictures, DispatcherPriority.Loaded);
+            return;
+        }
+        _hits = SearchRanking.Build(FinderQuery.Parse(_query), _artists, _songs, _albums, _identity);
         if (_filter == "All" && _hits.FirstOrDefault() is {} top)
         {
             Heading("Top result"); Add(top, "hero");
@@ -221,6 +301,13 @@ internal sealed class DiscoveryView : UserControl, IDisposable
             if (hero) FinderTheme.Primary(now); else now.Classes.Add("finder-quiet"); queue.Classes.Add("finder-quiet");
             now.Click += async (_, _) => await Queue(track, true); queue.Click += async (_, _) => await Queue(track, false);
             buttons.Children.Add(now); buttons.Children.Add(queue);
+            if (ForYouMode && _forYouSource is not null && presentation == "row")
+            {
+                var notForMe = new Button { Content = "Not for me", Margin = new Thickness(6, 3, 0, 0) }; notForMe.Classes.Add("finder-quiet");
+                ToolTip.SetTip(notForMe, "Don't suggest this song again. After two, its artist is left out too.");
+                notForMe.Click += (_, _) => { if (_cards.TryGetValue(hit.Kind + ":" + hit.Id + ":" + presentation, out var self)) NotForMe(track, self.Card); };
+                buttons.Children.Add(notForMe);
+            }
             if (!_songButtons.TryGetValue(hit.Id, out var set)) _songButtons[hit.Id] = set = [];
             set.Add((now, queue, subtitle, hit));
         }
@@ -279,7 +366,8 @@ internal sealed class DiscoveryView : UserControl, IDisposable
         if (hit.Artist is {} artist) return artist.Genre.Length > 0 ? artist.Genre : "Artist";
         var text = hit.Track is {} song ? string.Join(", ", song.Song.Artists.Select(a => a.Name)) + (song.Song.Seconds is {} seconds ? " · " + TimeSpan.FromSeconds(seconds).ToString(@"m\:ss") : "") : hit.Subtitle;
         var explicitFlag = hit.Track is {} track ? track.Song.Explicit : hit.Album?.Explicit;
-        return text + (explicitFlag == true ? " · Explicit" : explicitFlag == false ? " · Clean version" : "");
+        var reason = ForYouMode && hit.Track is not null && _because.TryGetValue(hit.Id, out var why) ? " · " + why : "";
+        return text + (explicitFlag == true ? " · Explicit" : explicitFlag == false ? " · Clean version" : "") + reason;
     }
     private async Task Queue(CatalogSearchSong track, bool priority)
     {
@@ -289,7 +377,7 @@ internal sealed class DiscoveryView : UserControl, IDisposable
             var result = await _actions.QueueAsync([track.Song], priority, source.Token);
             if (_disposed || !ReferenceEquals(source, _search)) return;
             _status.Text = result.Owned > 0 ? "Already in your library." : result.Added > 0 ? priority ? "Downloading next, after any current transfer." : "Added to the download queue." : "Already queued or saved.";
-            var matches = await _actions.MatchAsync(_songs.Select(s => s.Song), source.Token); if (!_disposed && ReferenceEquals(source, _search)) { _matches = matches; RefreshSongs(); }
+            var matches = await _actions.MatchAsync(CurrentSongs().Select(s => s.Song), source.Token); if (!_disposed && ReferenceEquals(source, _search)) { _matches = matches; RefreshSongs(); }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { if (!_disposed && ReferenceEquals(source, _search)) _status.Text = ex.Message; }
@@ -323,11 +411,12 @@ internal sealed class DiscoveryView : UserControl, IDisposable
     }
     private void DownloadChanged(Download download) => Dispatcher.UIThread.Post(async () =>
     {
-        if (_disposed || _actions is null || _songs.Count == 0 || _search is not {} source || source.IsCancellationRequested) return;
+        var songs = CurrentSongs();
+        if (_disposed || _actions is null || songs.Count == 0 || _search is not {} source || source.IsCancellationRequested) return;
         if (_matches.Values.Any(m => ReferenceEquals(m.Download, download))) { RefreshSongs(); return; }
-        if (_matching || download.Track.Request is not {} request || !_songs.Any(s => SpotifyPlaylists.SameRecording(s.Song.Request, request))) return;
+        if (_matching || download.Track.Request is not {} request || !songs.Any(s => SpotifyPlaylists.SameRecording(s.Song.Request, request))) return;
         _matching = true;
-        try { var matches = await _actions.MatchAsync(_songs.Select(s => s.Song), source.Token); if (!_disposed && ReferenceEquals(source, _search)) { _matches = matches; RefreshSongs(); } }
+        try { var matches = await _actions.MatchAsync(songs.Select(s => s.Song), source.Token); if (!_disposed && ReferenceEquals(source, _search)) { _matches = matches; RefreshSongs(); } }
         catch (Exception) { /* The next explicit download rechecks and reports library failures. */ }
         finally { _matching = false; }
     });

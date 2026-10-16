@@ -3,6 +3,15 @@
 Finds songs and imports Spotify/Deezer playlists through Music Hunters and DeezLoad using
 your own Telegram account, from inside [Noctis](https://github.com/heartached/Noctis).
 
+Version **2.10.0** adds **For you**. Before you search, the Search tab shows songs you don't have yet, picked from the
+artists you play. It uses what you finish and what you skip early, from Noctis's history and True Shuffle's listening
+log, and how many songs of an artist you own. Each song says why it is there ("More from J. Cole", "Because you play
+Drake"). **Download now**, **Queue download** and **Not for me** work as usual; two "not for me" from one artist leave
+that artist out. Nothing downloads by itself, and songs you have or have queued are never suggested. Similar artists
+come from ListenBrainz, the open listening database (no account needed), with artists matched in MusicBrainz through
+your own songs by them, and from Deezer when Deezer can be reached. Only artist names and song titles are sent. The
+first load takes a few minutes; after that it is cached. **Refresh** picks again.
+
 Version **2.9.1** shows only current work in the download status. Finished downloads stay in
 history for duplicate checks, but do not inflate queue counts or progress. A single download
 shows its own transfer progress; queued, staged and provider-waiting requests are counted separately.
