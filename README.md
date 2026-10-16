@@ -3,6 +3,10 @@
 Finds songs and imports Spotify/Deezer playlists through Music Hunters and DeezLoad using
 your own Telegram account, from inside [Noctis](https://github.com/heartached/Noctis).
 
+Version **2.9.1** shows only current work in the download status. Finished downloads stay in
+history for duplicate checks, but do not inflate queue counts or progress. A single download
+shows its own transfer progress; queued, staged and provider-waiting requests are counted separately.
+
 Version **2.9.0** combines song and artist search into one **Search** tab. Search an artist,
 album, or `song by artist`; **All**, **Artists**, **Songs** and **Albums** filter the same
 results. A relevant top result leads the page; artist queries include recent releases.

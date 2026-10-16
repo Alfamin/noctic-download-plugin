@@ -53,6 +53,47 @@ internal static class WindowTests
         QueueStart(host, bot);
         PlaylistTab(host, LoggedIn(host), bot);
         UnifiedSearch(host, bot);
+        CurrentDownloadStatus(host, bot);
+    }
+
+    private static void CurrentDownloadStatus(FakeHost host, FakeBot bot)
+    {
+        Check.Section("download status describes current work, not saved history");
+        var folder = Check.NewFolder("current-download-status");
+        using var downloads = new Downloads(host.Log);
+        using var account = LoggedIn(host);
+        for (int i = 1; i <= 9; i++) downloads.Start(LogicTests.Track("Previously saved " + i), folder);
+        Check.Until(() => downloads.Active.Count == 0 && downloads.History.Count == 9, "nine earlier downloads have finished");
+        var window = new SearchWindow(host, account, downloads, bot.SearchAsync); window.Show();
+        var status = Field<TextBlock>(window, "_queueStatus");
+        var progress = Field<ProgressBar>(window, "_queueProgress");
+        var card = Field<Border>(window, "_queueCard");
+        Check.False(card.IsVisible, "completed history alone does not show a download queue");
+        var report = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        downloads.Start(new BotTrack("Tenth song", "Artist", null, "Artist - Tenth song", async (output, p, ct) =>
+        {
+            await report.Task.WaitAsync(ct);
+            p?.Report(.25);
+            await finish.Task.WaitAsync(ct);
+            await output.WriteAsync(new byte[5000], ct);
+            return "mp3";
+        }), folder, priority: true);
+        Check.Until(() => status.Text!.Contains("Tenth song") && progress.IsIndeterminate, "the new song shows Starting until its file transfer begins");
+        Check.True(card.IsVisible && progress.Value == 0 && !status.Text!.Contains("queued") && !status.Text.Contains("saved"), "one immediate download has no fabricated backlog or 9-of-10 progress");
+        report.SetResult();
+        Check.Until(() => progress.Value == 25 && !progress.IsIndeterminate, "the progress bar follows the current file's actual 25 percent");
+        downloads.Start(LogicTests.Track("Eleventh song"), folder, held: true);
+        Check.Until(() => status.Text!.Contains("1 ready") && status.Text.Contains("Tenth song"), "a genuinely staged song is counted separately from the current transfer");
+        downloads.SetPaused(true);
+        downloads.Start(LogicTests.Track("Twelfth song"), folder);
+        Check.Until(() => status.Text!.Contains("1 queued · paused") && status.Text.Contains("1 ready"), "paused backlog and songs awaiting Start retain their own counts");
+        finish.SetResult();
+        Check.Until(() => downloads.History.Count(d => d.State == DownloadState.Saved) == 10 && !progress.IsVisible, "after the current download finishes a paused queue has no fake file progress");
+        downloads.ReleaseHeld(); downloads.SetPaused(false);
+        Check.Until(() => downloads.Active.Count == 0 && !card.IsVisible, "finishing the remaining songs hides the download panel again");
+        Check.Equal(12, downloads.History.Count(d => d.State == DownloadState.Saved), "all saved history remains available for duplicate checks");
+        window.Close();
     }
 
     /// <summary>Songs queued from a playlist wait for a start of their own. The queue's one button gives it.</summary>
@@ -279,7 +320,7 @@ internal static class WindowTests
         File.SetLastWriteTimeUtc(dead, DateTime.UtcNow.AddHours(-1));
 
         var plugin = new FreeMusicPlugin((data, _) => DiscoveryTests.Catalog(data, new DiscoveryTests.Http()));
-        Check.Equal("2.9.0", plugin.Info.Version, "the version is the one in plugin.json");
+        Check.Equal("2.9.1", plugin.Info.Version, "the version is the one in plugin.json");
         plugin.Initialize(host);
         Check.Equal("Find more by this artist…", string.Join(",", host.Commands.Select(c => c.Label)), "one track menu entry");
         Check.Until(() => !File.Exists(dead), "what an interrupted download left behind is removed at the start");

@@ -9,6 +9,9 @@ You need: Noctis 1.5.3 or newer, a Telegram account, and the file
 
 ## 1. Install the zip
 
+**Fixed in 2.9.1:** download status shows the current song's progress and actual waiting requests.
+Previously saved songs no longer appear as part of a new download queue.
+
 **New in 2.9:** one **Search** tab for artists, songs and albums. Type a name or `song by artist`
 and press Enter. **All** shows the top match and related results; **Artists**, **Songs** and
 **Albums** narrow them. Artist searches include recent releases. Artist/album buttons open the

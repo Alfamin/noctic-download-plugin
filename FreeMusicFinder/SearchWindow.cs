@@ -454,22 +454,34 @@ internal sealed class SearchWindow : Window
     }
     private void ShowQueue()
     {
-        var all=_downloads.History;var done=all.Count(d=>d.State is DownloadState.Saved or DownloadState.AlreadyThere);
-        var pending=all.Count(d=>d.IsActive);var failed=all.Count(d=>d.State==DownloadState.Failed);
-        var waiting=all.Where(d=>d.State==DownloadState.Waiting).ToArray();
-        _queueStatus.Text=all.Count==0?"Paste a playlist link to start a saved import.":$"{done} saved / {all.Count} queued · {pending} pending · {failed} need retry";
+        // Saved history prevents duplicate downloads; it is not the current download queue.
+        var active = _downloads.Active.Where(d => d.IsActive).ToArray();
+        var running = active.FirstOrDefault(d => d.State == DownloadState.Running);
+        var pending = active.Length;
+        var failed = _downloads.History.Count(d => d.State == DownloadState.Failed);
+        var waiting = active.Where(d => d.State == DownloadState.Waiting && !d.Held).ToArray();
+        var held = active.Count(d => d.Held);
+        var queued = active.Count(d => d.State == DownloadState.Queued && !d.Held);
+        var collecting = _transfers?.Jobs.Any(j => !j.Complete) == true;
+        var parts = new List<string>();
+        if (running is not null)
+            parts.Add(running.Progress > 0 ? $"Downloading \"{running.Track.Title}\" · {running.Progress:P0}" : $"Starting \"{running.Track.Title}\"…");
+        if (queued > 0) parts.Add($"{queued} queued" + (_downloads.Paused ? " · paused" : ""));
+        if (waiting.Length > 0) parts.Add($"{waiting.Length} waiting for provider");
+        if (held > 0) parts.Add($"{held} ready: press Start queued downloads");
+        if (failed > 0) parts.Add($"{failed} need retry");
+        if (collecting) parts.Add("Collecting playlist songs…");
+        _queueStatus.Text = parts.Count > 0 ? string.Join(" · ", parts) : "No downloads queued";
         if(waiting.Length>0 && waiting.Min(d=>d.RetryAt) is {} retry) _queueStatus.Text+=$" · next check {retry.ToLocalTime():ddd HH:mm}";
-        if(_downloads.Paused) _queueStatus.Text+=" · paused after the current request";
-        var held = _downloads.Active.Count(d => d.Held);
-        if (held > 0) _queueStatus.Text += $" · {held} ready: press Start queued downloads";
-        if(_transfers?.Jobs.Count(j=>!j.Complete)>0) _queueStatus.Text+=" · playlist collection continues";
-        _queueProgress.Value=all.Count>0?100.0*done/all.Count:0;
+        _queueProgress.IsIndeterminate = running is { Progress: <= 0 } || running is null && collecting;
+        _queueProgress.Value = running is not null && double.IsFinite(running.Progress) ? 100 * Math.Clamp(running.Progress, 0, 1) : 0;
+        _queueProgress.IsVisible = running is not null || collecting;
         _pauseButton.Content=held>0?"Start queued downloads":_downloads.Paused?"Resume queue":"Pause queue";
         // Coloured while there is something for it to start.
         _pauseButton.Classes.Set("finder-primary",held>0 || _downloads.Paused && pending>0);
         _queueTab.Header=(_discovery is null ? "Queue" : "Downloads") + $" ({pending+failed})";
         _queueView.Refresh();
-        _queueCard.IsVisible = _tabs.SelectedItem is not TabItem { Content: PlaylistView } && ((_discovery is null ? all.Count : pending + failed) > 0 || _transfers?.Jobs.Any(j => !j.Complete) == true);
+        _queueCard.IsVisible = _tabs.SelectedItem is not TabItem { Content: PlaylistView } && (pending + failed > 0 || collecting);
     }
 
     private void OpenFolder()
