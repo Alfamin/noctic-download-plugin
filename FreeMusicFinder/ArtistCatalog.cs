@@ -24,7 +24,9 @@ internal sealed partial class ArtistCatalog : IDisposable
 {
     private readonly HttpClient _http;
     private readonly string _folder;
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly CatalogLocks _locks = new();
+    private readonly SemaphoreSlim _metadataSlots = new(3, 3), _appleStart = new(1, 1);
+    private readonly object _limitsLock = new();
     private readonly Func<DateTimeOffset> _now;
     private readonly TimeSpan _applePace;
     private DateTimeOffset _nextApple;
@@ -217,8 +219,7 @@ internal sealed partial class ArtistCatalog : IDisposable
         var savedBeforeWait = await ReadAsync<T>(key, ct).ConfigureAwait(false);
         // Fresh local data never queues behind an unrelated slow network operation.
         if (!refresh && savedBeforeWait is not null && _now() - savedBeforeWait.SavedAt < age) return new(savedBeforeWait.Value, savedBeforeWait.SavedAt, true, savedBeforeWait.Warning);
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
-        try
+        using (await _locks.EnterAsync(key, ct).ConfigureAwait(false))
         {
             var old = Read<T>(key);
             if (!refresh && old is not null && _now() - old.SavedAt < age) return new(old.Value, old.SavedAt, true, old.Warning);
@@ -235,7 +236,6 @@ internal sealed partial class ArtistCatalog : IDisposable
             catch (Exception ex) when (old is not null && Recoverable(ex))
             { return new(old.Value, old.SavedAt, true, "Showing saved metadata. " + Explain(ex)); }
         }
-        finally { _gate.Release(); }
     }
     private Cache<T>? Read<T>(string key)
     {
@@ -285,23 +285,40 @@ internal sealed partial class ArtistCatalog : IDisposable
     }
     private async Task<JsonDocument> Get(string provider, string path, CancellationToken ct)
     {
-        if (_wait.TryGetValue(provider, out var until) && until > _now()) throw new SourcesWaitingException(provider + " catalog is waiting until " + until.ToLocalTime().ToString("g") + ". Cached results remain available.", until);
+        void CheckCooldown()
+        {
+            lock (_limitsLock)
+                if (_wait.TryGetValue(provider, out var until) && until > _now()) throw new SourcesWaitingException(provider + " catalog is waiting until " + until.ToLocalTime().ToString("g") + ". Cached results remain available.", until);
+        }
+        CheckCooldown();
         if (provider == "apple")
         {
-            var delay = _nextApple - _now(); if (delay > TimeSpan.Zero) await Task.Delay(delay, ct).ConfigureAwait(false);
-            _nextApple = _now() + _applePace;
+            await _appleStart.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                var delay = _nextApple - _now(); if (delay > TimeSpan.Zero) await Task.Delay(delay, ct).ConfigureAwait(false);
+                CheckCooldown(); await _metadataSlots.WaitAsync(ct).ConfigureAwait(false);
+                _nextApple = _now() + _applePace;
+            }
+            finally { _appleStart.Release(); }
         }
+        else await _metadataSlots.WaitAsync(ct).ConfigureAwait(false);
         var url = (provider == "apple" ? "https://itunes.apple.com" : "https://api.deezer.com") + path;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(25));
         try
         {
+            CheckCooldown();
             using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
             if (response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.Forbidden)
             {
                 var retry = response.Headers.RetryAfter?.Date ?? _now().Add(response.Headers.RetryAfter?.Delta ?? TimeSpan.FromMinutes(30));
                 retry = retry < _now().AddSeconds(3) ? _now().AddSeconds(3) : retry > _now().AddDays(7) ? _now().AddDays(7) : retry;
-                _wait[provider] = retry;
-                try { AtomicJson.Write(SafeFile("limits.json")!, _wait); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException) { }
+                lock (_limitsLock)
+                {
+                    if (!_wait.TryGetValue(provider, out var previous) || retry > previous) _wait[provider] = retry;
+                    retry = _wait[provider];
+                    try { AtomicJson.Write(SafeFile("limits.json")!, _wait); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException) { }
+                }
                 throw new SourcesWaitingException($"CATALOG_HTTP_{(int)response.StatusCode}: {provider} refused or limited this connection. Check your VPN/proxy or retry later.", retry);
             }
             if (!response.IsSuccessStatusCode) throw new HttpRequestException($"CATALOG_HTTP_{(int)response.StatusCode}: {provider} catalog could not be read. Check connectivity and retry.");
@@ -315,6 +332,7 @@ internal sealed partial class ArtistCatalog : IDisposable
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new TimeoutException("CATALOG_TIMEOUT: " + provider + " did not finish its response in 25 seconds. Check your VPN/proxy and retry."); }
         catch (JsonException ex) { throw new InvalidDataException("CATALOG_FORMAT_CHANGED: The service returned an unsupported response.", ex); }
+        finally { _metadataSlots.Release(); }
     }
     private static (string Provider, string Id) Split(string value)
     {

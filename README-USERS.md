@@ -9,6 +9,11 @@ You need: Noctis 1.5.3 or newer, a Telegram account, and the file
 
 ## 1. Install the zip
 
+**Fixed in 2.11.1:** For you's download buttons and Refresh stay inside the window, including at narrow widths.
+**Not for me** hides that song, with **Undo** available for eight seconds. Other songs by the artist stay eligible,
+even after several dismissals. Older automatic artist exclusions are removed; individual song preferences remain.
+Artist pages and search sections can load alongside other metadata work rather than waiting for it to finish.
+
 **New in 2.11.0: faster For you.** Your last successful picks appear when you reopen Finder.
 Older picks refresh quietly; click **New picks ready** to show them when you want. **Refresh** keeps the current
 list visible, and downloads still need your own click. The first uncached visit still needs the music catalogs.
@@ -27,8 +32,8 @@ without an account. Right-click a recommendation for its artist's Last.fm page.
 **New in 2.10.0: For you.** Before you search, the Search tab shows songs you don't have yet, picked from the
 artists you play. It uses what you finish and what you skip early, from Noctis's history and True Shuffle's listening
 log, and how many songs of an artist you own. Each song says why it is there ("More from J. Cole", "Because you play
-Drake"). **Download now**, **Queue download** and **Not for me** work as usual; two "not for me" from one artist leave
-that artist out. Nothing downloads by itself, and songs you have or have queued are never suggested. Similar artists
+Drake"). **Download now**, **Queue download** and **Not for me** work as usual. Current versions hide only the song,
+with a brief Undo action. Nothing downloads by itself, and songs you have or have queued are never suggested. Similar artists
 come from ListenBrainz, the open listening database (no account needed), with artists matched in MusicBrainz through
 your own songs by them, and from Deezer when Deezer can be reached. Only artist names and song titles are sent. The
 first load takes a few minutes; after that it is cached. **Refresh** picks again.

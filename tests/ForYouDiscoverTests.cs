@@ -121,10 +121,19 @@ internal static class ForYouDiscoverTests
     {
         var path = Path.Combine(Check.NewFolder("for-you-hidden"), "for-you-hidden.json");
         var hidden = new DiscoverHidden(path); var artist = A("77", "Someone");
-        Check.False(hidden.Hide(new CatalogSong("deezer:77-1", "One", [artist], 1, true)), "the first 'not for me' hides the song only");
-        Check.True(hidden.Hide(new CatalogSong("deezer:77-2", "Two", [artist], 1, true)), "the second from the same artist leaves the artist out too");
+        var first = new CatalogSong("deezer:77-1", "One", [artist], 1, true);
+        Check.True(hidden.Hide(first), "the first 'not for me' hides only that song");
+        var other = new CatalogSong("deezer:77-3", "Three", [artist], 1, true);
+        Check.True(hidden.Hide(new CatalogSong("deezer:77-2", "Two", [artist], 1, true)) && !hidden.HidesSong(other), "a second dismissal leaves other songs by the artist eligible");
         var again = new DiscoverHidden(path);
-        Check.True(again.HidesSong("deezer:77-1") && again.HidesArtist("deezer:77"), "dismissals are remembered after a restart");
+        Check.True(again.HidesSong("deezer:77-1") && again.HidesSong("deezer:77-2") && !again.HidesSong(other), "song-only dismissals survive a restart");
+        Check.True(again.HidesSong(first with { Id = "apple:10", Explicit = false }), "the same song on another release/provider stays dismissed");
+        Check.False(again.HidesSong(first with { Id = "apple:11", Title = "One (Live)" }), "a distinct live recording is not hidden by the studio song preference");
+        again.Undo(first); again = new DiscoverHidden(path);
+        Check.True(!again.HidesSong(first) && again.HidesSong("deezer:77-2"), "Undo persists and leaves other song preferences intact");
+        File.WriteAllText(path, JsonSerializer.Serialize(new { Songs = new[] { "deezer:77-1" }, Artists = new[] { artist.Id }, Counts = new Dictionary<string, int> { [artist.Id] = 2 } }));
+        var legacy = new DiscoverHidden(path);
+        Check.True(legacy.HidesSong(first.Id) && !legacy.HidesSong(other), "legacy automatic artist exclusions are lifted while dismissed songs stay hidden");
     }
 
     private static async Task RelatedFromDeezer()
@@ -244,7 +253,7 @@ internal static class ForYouDiscoverTests
         var notForMe = view.GetVisualDescendants().OfType<Button>().Where(b => Equals(b.Content, "Not for me")).ToList();
         Check.Equal(3, notForMe.Count, "every suggested song can be dismissed");
         notForMe[0].RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Dispatcher.UIThread.RunJobs();
-        Check.True(Text(view).Any(t => t.StartsWith("Got it")) && view.GetVisualDescendants().OfType<Button>().Count(b => Equals(b.Content, "Not for me")) == 2, "'Not for me' removes the song at once");
+        Check.True(Text(view).Any(t => t.StartsWith("Hidden “")) && view.GetVisualDescendants().OfType<Button>().Count(b => Equals(b.Content, "Not for me")) == 2, "'Not for me' removes the song at once and offers Undo");
         Button Find(string label) => view.GetVisualDescendants().OfType<Button>().First(b => Equals(b.Content, label) && b.IsEnabled);
         Find("Queue download").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Check.Until(() => downloads.Active.Count == 1, "Queue download on a For you song puts it in the download queue");

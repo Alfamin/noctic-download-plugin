@@ -22,9 +22,16 @@ internal sealed class DiscoveryView : UserControl, IDisposable
     private bool _forYouStarted;
     private bool _newPicksReady;
     private Button? _forYouRefresh;
+    private readonly Border _undoToast = new() { IsVisible = false, Padding = new Thickness(10, 6), CornerRadius = new CornerRadius(8) };
+    private readonly TextBlock _undoText = new() { VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+    private CancellationTokenSource? _undoStop;
+    private readonly TimeSpan _undoDuration;
+    private readonly System.Diagnostics.Stopwatch _undoClock = new();
+    private (DiscoverSong Song, int Index, DiscoverResult Page)? _dismissed;
     private readonly TextBlock _status = FinderTheme.Caption("Search artists, songs and albums above. Browsing does not need Telegram.");
     private readonly StackPanel _results = new() { Spacing = 8 };
-    private readonly ScrollViewer _scroll = new();
+    // Noctis enables horizontal scrolling globally. An unconstrained song grid puts its Auto action column off-screen.
+    private readonly ScrollViewer _scroll = new() { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
     private readonly ProgressBar _loading = new() { IsIndeterminate = true, Height = 3, IsVisible = false };
     private readonly Dictionary<string, Button> _filters = new();
     private readonly Dictionary<string, (Border Card, ArtistPicture Picture, FinderHit Hit, TextBlock Detail)> _cards = new();
@@ -44,9 +51,13 @@ internal sealed class DiscoveryView : UserControl, IDisposable
     public bool BotMode => _filter == "Download bots";
     public string Query => _query;
     public DiscoveryView(Func<ArtistCatalog> catalog, Action<CatalogArtist> open, Func<string, IReadOnlyList<string>>? localAlbums = null,
-        DiscoveryActions? actions = null, Func<CatalogRelease, CancellationToken, Task>? openAlbum = null, ForYouSource? forYou = null)
+        DiscoveryActions? actions = null, Func<CatalogRelease, CancellationToken, Task>? openAlbum = null, ForYouSource? forYou = null, TimeSpan? undoDuration = null)
     {
         _catalog = catalog; _open = open; _localAlbums = localAlbums; _actions = actions; _openAlbum = openAlbum; _forYouSource = forYou;
+        _undoDuration = undoDuration ?? TimeSpan.FromSeconds(8);
+        var undo = new Button { Content = "Undo", Margin = new Thickness(12, 0, 0, 0) }; undo.Classes.Add("finder-quiet"); undo.Click += (_, _) => UndoDismissal();
+        var undoRow = new Grid { ColumnDefinitions = new("*,Auto") }; undoRow.Children.Add(_undoText); Grid.SetColumn(undo, 1); undoRow.Children.Add(undo);
+        _undoToast.Child = undoRow; _undoToast.Bind(Border.BackgroundProperty, FinderTheme.Resource("FinderPanel"));
         var filters = new WrapPanel();
         foreach (var label in (forYou is null ? new[] { "All" } : new[] { "For you", "All" }).Concat(new[] { "Artists", "Songs", "Albums", "Download bots" }))
         {
@@ -55,7 +66,7 @@ internal sealed class DiscoveryView : UserControl, IDisposable
             button.Click += (_, _) => SelectFilter(label); _filters[label] = button; filters.Children.Add(button);
         }
         ToolTip.SetTip(_filters["Download bots"], "Search Music Hunters and DeezLoad for unreleased songs or missing catalog results. Requires Telegram.");
-        var header = new StackPanel { Spacing = 7 }; header.Children.Add(filters); header.Children.Add(_loading); header.Children.Add(_status);
+        var header = new StackPanel { Spacing = 7 }; header.Children.Add(filters); header.Children.Add(_loading); header.Children.Add(_status); header.Children.Add(_undoToast);
         _scroll.Content = _results; _scroll.ScrollChanged += (_, _) => LoadPictures(); _scroll.SizeChanged += (_, _) => LoadPictures();
         SizeChanged += (_, _) => LayoutSongActions();
         var root = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 12 }; root.Children.Add(header); Grid.SetRow(_scroll, 1); root.Children.Add(_scroll); Content = root;
@@ -87,6 +98,7 @@ internal sealed class DiscoveryView : UserControl, IDisposable
             // Back from another tab, whose leaving cancelled the page's token: the buttons need a live one again.
             if (_search is null || _search.IsCancellationRequested) { _search?.Dispose(); _search = new CancellationTokenSource(); }
             var shown = _search;
+            SetForYouStatus(_forYou);
             Render();
             if (_actions is null || _forYou.Songs.Count == 0) return;
             try { var matches = await _actions.MatchAsync(CurrentSongs().Select(s => s.Song), shown.Token); if (!_disposed && ReferenceEquals(shown, _search) && ForYouMode) { _matches = matches; RefreshSongs(); } }
@@ -137,10 +149,12 @@ internal sealed class DiscoveryView : UserControl, IDisposable
         if (_forYou is not null && !result.Songs.Select(s => s.Track.Song.Id).SequenceEqual(_forYou.Songs.Select(s => s.Track.Song.Id))) ClearCards();
         _forYou = result; _newPicksReady = false;
         _because = result.Songs.GroupBy(s => s.Track.Song.Id).ToDictionary(g => g.Key, g => g.First().Because);
-        _status.Text = result.Notice.Length > 0 ? result.Notice
-            : $"{result.Songs.Count} songs you don't have yet, picked from the artists you play. Nothing downloads until you choose.";
+        SetForYouStatus(result);
         if (ForYouMode) Render();
     }
+
+    private void SetForYouStatus(DiscoverResult result) => _status.Text = result.Notice.Length > 0 ? result.Notice
+        : $"{result.Songs.Count} songs you don't have yet, picked from the artists you play. Nothing downloads until you choose.";
 
     private void OnPicksReady(DiscoverResult result) => Dispatcher.UIThread.Post(() =>
     {
@@ -181,14 +195,47 @@ internal sealed class DiscoveryView : UserControl, IDisposable
     private void NotForMe(CatalogSearchSong track, Border card)
     {
         if (_forYouSource is null || _forYou is null) return;
-        bool artistToo = _forYouSource.Hidden.Hide(track.Song);
+        int index = _forYou.Songs.FindIndex(s => s.Track.Song.Id == track.Song.Id);
+        if (index < 0) return;
+        var dismissed = _forYou.Songs[index]; bool added = _forYouSource.Hidden.Hide(track.Song);
         _forYouSource.Forget();
         _newPicksReady = false; if (_forYouRefresh is not null) _forYouRefresh.Content = "Refresh";
-        var leaving = artistToo && track.Song.Artists.FirstOrDefault() is { } artist ? artist.Id : null;
-        _forYou = _forYou with { Songs = _forYou.Songs.Where(s => s.Track.Song.Id != track.Song.Id && (leaving is null || s.Track.Song.Artists.FirstOrDefault()?.Id != leaving)).ToList() };
-        if (card.Parent is Panel parent) parent.Children.Remove(card);
-        _status.Text = artistToo ? $"Got it: no more {track.Song.Artists[0].Name} in For you." : "Got it: that song won't be suggested again.";
-        if (leaving is not null) Render();
+        _forYou = _forYou with { Songs = _forYou.Songs.Where(s => !_forYouSource.Hidden.HidesSong(s.Track.Song)).ToList() };
+        ExpireUndo();
+        if (added)
+        {
+            _dismissed = (dismissed, index, _forYou); _undoText.Text = "Hidden “" + track.Song.Title + "”";
+            _undoClock.Restart(); _undoToast.IsVisible = ForYouMode;
+            _ = ExpireUndoAsync(_undoStop = new CancellationTokenSource());
+        }
+        SetForYouStatus(_forYou); Render();
+    }
+    private void ExpireUndo() { _undoStop?.Cancel(); _undoStop?.Dispose(); _undoStop = null; _dismissed = null; _undoToast.IsVisible = false; }
+    private async Task ExpireUndoAsync(CancellationTokenSource stop)
+    {
+        try
+        {
+            await Task.Delay(_undoDuration, stop.Token).ConfigureAwait(false);
+            Dispatcher.UIThread.Post(() => { if (!_disposed && ReferenceEquals(_undoStop, stop)) ExpireUndo(); });
+        }
+        catch (OperationCanceledException) { }
+    }
+    private void UndoDismissal()
+    {
+        if (_dismissed is not { } dismissed || _forYouSource is null || _undoClock.Elapsed >= _undoDuration) { ExpireUndo(); return; }
+        _forYouSource.Hidden.Undo(dismissed.Song.Track.Song); _forYouSource.Forget();
+        if (_forYou is { } page && ReferenceEquals(page, dismissed.Page))
+        {
+            var songs = page.Songs.ToList(); songs.Insert(Math.Min(dismissed.Index, songs.Count), dismissed.Song);
+            _forYou = page with { Songs = songs };
+        }
+        ExpireUndo();
+        if (ForYouMode && _forYou is not null)
+        {
+            // A refresh that began before Undo must not replace the restored row with its older snapshot.
+            _search?.Cancel(); _loading.IsVisible = false;
+            SetForYouStatus(_forYou); LoadForYou(false);
+        }
     }
     public void SelectFilter(string filter)
     {
@@ -199,7 +246,7 @@ internal sealed class DiscoveryView : UserControl, IDisposable
         else if (ForYouMode) { CatalogSelected?.Invoke(); LoadForYou(false); }
         else { CatalogSelected?.Invoke(); if ((_search?.IsCancellationRequested == true || _forYouStarted && _hits.Count == 0) && _query.Length > 0) Search(_query); else Render(); }
     }
-    private void UpdateFilters() { foreach (var (name, button) in _filters) button.Classes.Set("finder-primary", name == _filter); }
+    private void UpdateFilters() { foreach (var (name, button) in _filters) button.Classes.Set("finder-primary", name == _filter); _undoToast.IsVisible = ForYouMode && _dismissed is not null; }
     public void ShowBots(Control content, string? query = null)
     {
         if (query is not null) _query = query.Trim();
@@ -234,19 +281,27 @@ internal sealed class DiscoveryView : UserControl, IDisposable
             }
             if (_hits.FirstOrDefault() is { Artist: {} leading } && BotText.Key(leading.Name) == BotText.Key(name))
             {
-                try
+                await Task.WhenAll(ArtistSongs(), RecentReleases());
+                async Task ArtistSongs()
                 {
-                    var artistSongs = await _catalog().ArtistSongsAsync(leading, ct); if (!Current()) return;
-                    _songs = artistSongs.Value.Concat(_songs).DistinctBy(s => s.Song.Id).ToList(); Render();
+                    try
+                    {
+                        var artistSongs = await _catalog().ArtistSongsAsync(leading, ct); if (!Current()) return;
+                        _songs = artistSongs.Value.Concat(_songs).DistinctBy(s => s.Song.Id).ToList(); Render();
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add("Artist songs: " + ArtistCatalog.Explain(ex)); }
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add("Artist songs: " + ArtistCatalog.Explain(ex)); }
-                try
+                async Task RecentReleases()
                 {
-                    var profile = await _catalog().ArtistAsync(leading, false, ct); if (!Current()) return;
-                    _recent = profile.Value.Releases.Where(r => r.Artist.Id == leading.Id).Take(6).ToList();
-                    if (profile.Warning.Length > 0) warnings.Add(profile.Warning);
+                    try
+                    {
+                        var profile = await _catalog().ArtistAsync(leading, false, ct); if (!Current()) return;
+                        _recent = profile.Value.Releases.Where(r => r.Artist.Id == leading.Id).Take(6).ToList();
+                        if (profile.Warning.Length > 0) warnings.Add(profile.Warning);
+                        Render();
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add("Recent releases: " + ArtistCatalog.Explain(ex)); }
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add("Recent releases: " + ArtistCatalog.Explain(ex)); }
             }
             if (!Current()) return; Render();
             if (_actions is not null && _songs.Count > 0)
@@ -495,5 +550,5 @@ internal sealed class DiscoveryView : UserControl, IDisposable
                 picture.Load(_catalog(), hit.Artist ?? hit.Album?.Artist ?? hit.Track!.Song.Artists[0], _search.Token);
     }
     private void ClearCards() { foreach (var (_, item) in _cards) item.Picture.Dispose(); _cards.Clear(); _songButtons.Clear(); _songLayouts.Clear(); }
-    public void Dispose() { if (_disposed) return; _disposed = true; _search?.Cancel(); _search?.Dispose(); _search = null; ClearCards(); if (_actions is not null) _actions.Downloads.Changed -= DownloadChanged; if (_forYouSource is not null) _forYouSource.PicksReady -= OnPicksReady; }
+    public void Dispose() { if (_disposed) return; _disposed = true; ExpireUndo(); _search?.Cancel(); _search?.Dispose(); _search = null; ClearCards(); if (_actions is not null) _actions.Downloads.Changed -= DownloadChanged; if (_forYouSource is not null) _forYouSource.PicksReady -= OnPicksReady; }
 }

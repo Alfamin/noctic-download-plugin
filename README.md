@@ -3,6 +3,15 @@
 Finds songs and imports Spotify/Deezer playlists through Music Hunters and DeezLoad using
 your own Telegram account, from inside [Noctis](https://github.com/heartached/Noctis).
 
+Version **2.11.1** fixes For you's missing download/Refresh buttons: Noctis's global horizontal-scrolling style
+had pushed them outside the window. Actions now stay visible at normal and narrow widths. **Not for me** hides only
+the chosen song, with **Undo** for eight seconds; repeated dismissals never ban the artist. Old automatic artist
+exclusions are lifted while the individual dismissed songs stay hidden. Equivalent release/provider copies are
+kept hidden too. Artist metadata requests no longer wait behind unrelated slow requests; concurrency is bounded,
+same-key requests coalesce, and Apple's shared pacing/proxy/cooldown rules remain in effect. Artist songs and recent
+releases load independently, and unchanged verified artist choices are not rewritten on each visit.
+See [details and validation](docs/FOR-YOU-2.11.1.md).
+
 Version **2.11.0** makes **For you** faster and keeps your last successful picks between sessions.
 Optionally paste your own **Last.fm API key** in Finder settings for better similar artists. Last.fm is tried first;
 ListenBrainz/MusicBrainz and Deezer remain backups. Seed relations run three at a time; related artists' songs need
@@ -19,8 +28,8 @@ Version **2.10.1** fixes For you's **Download now** and **Queue download**, whic
 Version **2.10.0** adds **For you**. Before you search, the Search tab shows songs you don't have yet, picked from the
 artists you play. It uses what you finish and what you skip early, from Noctis's history and True Shuffle's listening
 log, and how many songs of an artist you own. Each song says why it is there ("More from J. Cole", "Because you play
-Drake"). **Download now**, **Queue download** and **Not for me** work as usual; two "not for me" from one artist leave
-that artist out. Nothing downloads by itself, and songs you have or have queued are never suggested. Similar artists
+Drake"). **Download now**, **Queue download** and **Not for me** work as usual. Current versions hide only the song,
+with a brief Undo action. Nothing downloads by itself, and songs you have or have queued are never suggested. Similar artists
 come from ListenBrainz, the open listening database (no account needed), with artists matched in MusicBrainz through
 your own songs by them, and from Deezer when Deezer can be reached. Only artist names and song titles are sent. The
 first load takes a few minutes; after that it is cached. **Refresh** picks again.

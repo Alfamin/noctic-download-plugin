@@ -288,8 +288,10 @@ internal sealed class NativeCatalogPages : IDisposable
     private static string ViewKey(object vm) => string.Join("|", Get(vm, "SelectedTab"), Get(vm, "ReleaseSortMode"), Get(vm, "GridColumns"), vm.GetType().GetField("_query", Private)?.GetValue(vm));
     private void SaveChoice(string name, CatalogArtist artist, bool manual = false)
     {
+        bool unchanged = _chosen.TryGetValue(name, out var old) && old.Id == artist.Id && old.Name == artist.Name && old.Genre == artist.Genre && _manualChoices.Contains(name) == manual;
         _chosen[name] = artist;
         if (manual) _manualChoices.Add(name); else _manualChoices.Remove(name);
+        if (unchanged) return;
         if (_choicesPath is not null) try { AtomicJson.Write(_choicesPath, _chosen.ToDictionary(p => p.Key, p => new ArtistChoice(p.Value.Id, p.Value.Name, p.Value.Genre, _manualChoices.Contains(p.Key)))); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { _log("CATALOG_CHOICE_SAVE_FAILED: artist choice works for this session but could not be saved."); }
     }
     private void ReattachArtist(ArtistState state, UserControl page)

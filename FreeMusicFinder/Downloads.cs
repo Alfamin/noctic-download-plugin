@@ -44,7 +44,14 @@ internal sealed class Downloads : IDisposable
             if (new FileInfo(store).Length > 16 * 1024 * 1024 || (File.GetAttributes(store) & FileAttributes.ReparsePoint) != 0)
                 throw new InvalidDataException("QUEUE_UNREADABLE: saved queue is too large or redirected.");
             QueueFile file;
-            try { file = System.Text.Json.JsonSerializer.Deserialize<QueueFile>(File.ReadAllText(store)) ?? throw new InvalidDataException(); }
+            try
+            {
+                // Atomic checkpoint replacement can overlap this read while an old worker exits. Read one stable
+                // handle, allowing its writer/rename to finish instead of failing Noctis plugin startup.
+                using var input = new FileStream(store, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(input); // preserve the previous BOM/legacy encoding handling
+                file = System.Text.Json.JsonSerializer.Deserialize<QueueFile>(reader.ReadToEnd()) ?? throw new InvalidDataException();
+            }
             catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidDataException)
             { throw new InvalidDataException("QUEUE_UNREADABLE: keep the saved queue for diagnosis; it was not replaced.", ex); }
             if (file.Version != 1 || file.Items is null || file.Items.Length > 10000 || restore is null)

@@ -86,6 +86,7 @@ try
     ArtistPortraitTests.RunUi(pictures);
     UnifiedSearchTests.RunUi(pictures);
     ForYouDiscoverTests.RunUi();
+    ForYouLayoutTests.Run(pictures);
 }
 catch (Exception ex)
 {

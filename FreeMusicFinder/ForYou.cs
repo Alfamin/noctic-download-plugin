@@ -317,17 +317,17 @@ internal static class Discover
                 if (own.Contains(key))
                 {
                     artist = await catalog.FindAsync(used.First(s => BotText.Key(s.Name) == key), ct);
-                    if (artist is null || hidden.HidesArtist(artist.Id)) continue;
+                    if (artist is null) continue;
                     candidates = await catalog.TopSongsAsync(artist, ct);
                 }
                 else
                 {
                     var relatedSongs = await catalog.SongsByNameAsync(display[key], ct);
                     artist = relatedSongs.Artist; candidates = relatedSongs.Songs;
-                    if (artist is null || hidden.HidesArtist(artist.Id)) continue;
+                    if (artist is null) continue;
                 }
                 resolved[key] = artist; found++;
-                var top = candidates.Where(s => !hidden.HidesSong(s.Song.Id)).Take(SongsPerArtist).ToList();
+                var top = candidates.Where(s => !hidden.HidesSong(s.Song)).Take(SongsPerArtist).ToList();
                 for (int n = 0; n < top.Count; n++) songs.Add((top[n], value * (1 - 0.07 * n), key));
             }
             catch (Exception ex) when (ex is not OperationCanceledException) { failed++; lastError = ArtistCatalog.Explain(ex); }
@@ -363,13 +363,13 @@ internal static class Discover
     }
 }
 
-/// <summary>Songs the listener said "not for me" to. Two from the same artist and that artist is left out as well.</summary>
+/// <summary>Song-only dismissals. Legacy automatic artist exclusions are intentionally ignored.</summary>
 internal sealed class DiscoverHidden
 {
-    private sealed record Saved(List<string> Songs, List<string> Artists, Dictionary<string, int> Counts);
+    private sealed record Saved(List<string> Songs, Dictionary<string, string>? Recordings = null, int Version = 2);
     private readonly string _path;
-    private readonly HashSet<string> _songs = new(StringComparer.Ordinal), _artists = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, int> _counts = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _songs = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _recordings = new(StringComparer.Ordinal);
     private readonly object _lock = new();
 
     public DiscoverHidden(string path)
@@ -380,40 +380,36 @@ internal sealed class DiscoverHidden
             if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0 && new FileInfo(path).Length < 4 * 1024 * 1024
                 && JsonSerializer.Deserialize<Saved>(File.ReadAllText(path)) is { } saved)
             {
-                _songs.UnionWith(saved.Songs ?? []); _artists.UnionWith(saved.Artists ?? []);
-                foreach (var (k, v) in saved.Counts ?? []) _counts[k] = v;
+                _songs.UnionWith((saved.Songs ?? []).Where(s => s is { Length: > 0 and <= 200 }));
+                foreach (var (k, v) in saved.Recordings ?? []) if (_songs.Contains(k) && v is { Length: > 0 and <= 2000 }) _recordings[k] = v;
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { }
     }
 
     public bool HidesSong(string id) { lock (_lock) return _songs.Contains(id); }
-    public bool HidesArtist(string id) { lock (_lock) return _artists.Contains(id); }
+    public bool HidesSong(CatalogSong song) { lock (_lock) return _songs.Contains(song.Id) || _recordings.ContainsValue(Recording(song)); }
+    private static string Recording(CatalogSong song) => CatalogEditions.Key(song.Title) + "|" + BotText.Key(song.Artists.FirstOrDefault()?.Name ?? "");
 
-    /// <summary>Remembers the song; returns true when its artist is now left out too.</summary>
+    /// <summary>Returns true only for a new dismissal; Undo must not erase an older preference.</summary>
     public bool Hide(CatalogSong song)
     {
-        bool artistHidden = false;
-        Saved snapshot;
         lock (_lock)
         {
-            _songs.Add(song.Id);
-            if (song.Artists.FirstOrDefault() is { } artist)
-            {
-                int n = _counts[artist.Id] = _counts.GetValueOrDefault(artist.Id) + 1;
-                if (n >= 2) artistHidden = _artists.Add(artist.Id);
-            }
-            snapshot = new([.. _songs], [.. _artists], new(_counts));
+            if (HidesSong(song)) return false;
+            _songs.Add(song.Id); _recordings[song.Id] = Recording(song); Save(); return true;
         }
+    }
+    public void Undo(CatalogSong song) { lock (_lock) { _songs.Remove(song.Id); _recordings.Remove(song.Id); Save(); } }
+    private void Save()
+    {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
-            var temp = _path + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp";
-            File.WriteAllText(temp, JsonSerializer.Serialize(snapshot));
-            File.Move(temp, _path, overwrite: true);
+            for (var dir = new DirectoryInfo(Path.GetDirectoryName(Path.GetFullPath(_path))!); dir is not null; dir = dir.Parent)
+                if (dir.Exists && (dir.Attributes & FileAttributes.ReparsePoint) != 0) return;
+            AtomicJson.Write(_path, new Saved([.. _songs], new(_recordings)));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { } // kept for this session at least
-        return artistHidden;
     }
 }
 
@@ -446,8 +442,7 @@ internal sealed class ForYouSource(Func<ArtistCatalog> catalog, DiscoveryActions
 
     private DiscoverResult Filter(DiscoverResult result) => result with
     {
-        Songs = result.Songs.Where(s => !Hidden.HidesSong(s.Track.Song.Id) && !s.Track.Song.Artists.Any(a => Hidden.HidesArtist(a.Id))).ToList(),
-        Artists = result.Artists.Where(a => !Hidden.HidesArtist(a.Artist.Id)).ToList(),
+        Songs = result.Songs.Where(s => !Hidden.HidesSong(s.Track.Song)).ToList(),
     };
 
     public async Task<DiscoverResult> BuildAsync(bool refresh, IProgress<string>? progress, CancellationToken ct)

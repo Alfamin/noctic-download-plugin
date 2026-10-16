@@ -15,8 +15,24 @@ internal static class QueueManagementTests
         }) { Request = new(title, "Artist") };
     public static async Task RunAsync()
     {
+        SharedCheckpointRead();
         await Priority(); await RemovalAndRestart(); await CancelRunning(); await ClearAndStorageFailure(); await ClearImports();
         await WorkerSurvivesSaveFailure(); await ReportWhileHeld();
+    }
+    private static void SharedCheckpointRead()
+    {
+        var root = Check.NewFolder("queue-shared-checkpoint"); var path = Path.Combine(root, "queue.json");
+        AtomicJson.Write(path, new { Version = 1, Paused = true, Items = new[] { new
+            { Request = new MusicRequest("Retained", "Artist"), Folder = root, State = 0, Error = "", RetryAt = (DateTimeOffset?)null } } });
+        // Model the short-lived writer/replace handle around an atomic save. Never read a real user queue.
+        using var checkpoint = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+        using var restored = new Downloads(_ => { }, path, r => Track(r.Title));
+        Check.True(restored.Paused && restored.Active.Single().Track.Title == "Retained", "queue restore reads a stable checkpoint while a shareable writer/rename handle is open");
+        var legacyPath = Path.Combine(root, "legacy-utf16.json");
+        File.WriteAllText(legacyPath, JsonSerializer.Serialize(new { Version = 1, Paused = true, Items = new[] { new
+            { Request = new MusicRequest("Unicode فارسی", "Artist"), Folder = root, State = 0, Error = "", RetryAt = (DateTimeOffset?)null } } }), Encoding.Unicode);
+        using var legacy = new Downloads(_ => { }, legacyPath, r => Track(r.Title));
+        Check.Equal("Unicode فارسی", legacy.Active.Single().Track.Title, "shared checkpoint reads retain legacy UTF-16/BOM and Unicode song support");
     }
     private static async Task WorkerSurvivesSaveFailure()
     {
