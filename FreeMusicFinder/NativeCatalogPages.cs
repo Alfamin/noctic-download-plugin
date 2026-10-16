@@ -193,6 +193,21 @@ internal sealed class NativeCatalogPages : IDisposable
         _window()?.Activate();
     }
     internal IReadOnlyList<string> LocalAlbums(string name) => _main() is {} main ? ArtistAlbums(main, name) : [];
+    public async Task OpenAlbumAsync(CatalogRelease release, CancellationToken ct)
+    {
+        if (_disposed || !_enabled()) throw new InvalidOperationException("Enable catalog pages in Free Music Finder settings to open online albums.");
+        var main = _main() ?? throw Unsupported("main window"); var origin = Get(main, "CurrentView");
+        var result = await _catalog().AlbumAsync(release, false, ct);
+        var matches = await _actions.MatchAsync(result.Value.Songs, ct); ct.ThrowIfCancellationRequested();
+        if (_disposed || !_enabled() || !ReferenceEquals(Get(main, "CurrentView"), origin)) throw new OperationCanceledException("Noctis navigated to another page.", ct);
+        var type = main.GetType().GetMethods(Private | BindingFlags.Public)
+            .Where(m => m.Name == "OpenAlbumDetail").Select(m => m.GetParameters().FirstOrDefault()?.ParameterType)
+            .SingleOrDefault(t => t?.FullName == "Noctis.Models.Album") ?? throw Unsupported("album model");
+        var tile = NativeCatalogBridge.Album(type, result.Value.Release, null);
+        if ((_catalog().SavedArtwork(CatalogArtwork.LargeUrl(release.Artwork), true) ?? _catalog().SavedArtwork(release.Artwork)) is {} art)
+            Set(tile, "ArtworkPath", art);
+        var vm = NativeCatalogBridge.OpenAlbum(main, tile, result.Value, matches); _opened[vm] = (result.Value, tile); Scan(); _window()?.Activate();
+    }
     private async Task<CatalogArtist?> ResolveArtist(string name, WrapPanel? choices, CancellationToken ct, Action<CatalogArtist>? choose = null, IReadOnlyList<string>? albums = null)
     {
         _chosen.TryGetValue(name, out var saved);

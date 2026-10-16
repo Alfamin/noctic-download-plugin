@@ -60,23 +60,25 @@ internal sealed class SearchWindow : Window
 
         Title = "Free Music Finder";
         FinderTheme.Apply(this);
-        Width = 840;
-        Height = 740;
+        Width = 1020;
+        Height = 820;
         MinWidth = 480;
         MinHeight = 520;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
-        _query = new TextBox { PlaceholderText = "Search artist/title, or paste a Spotify or Deezer link" };
+        _query = new TextBox { PlaceholderText = "Search artists, songs or albums, or paste a Spotify/Deezer link" };
+        _query.Classes.Add("finder-search");
         _query.KeyDown += (_, e) =>
         {
             if (e.Key != Key.Enter) return;
             e.Handled = true;
-            StartSearch();
+            StartSearch(_discovery?.BotMode == true);
         };
 
         _searchButton = new Button { Content = "Search", Margin = new Thickness(8, 0, 0, 0), MinWidth = 80, HorizontalContentAlignment = HorizontalAlignment.Center };
-        _searchButton.Click += (_, _) => StartSearch();
+        _searchButton.Click += (_, _) => StartSearch(_discovery?.BotMode == true);
         FinderTheme.Primary(_searchButton);
+        _searchButton.CornerRadius = new CornerRadius(24); _searchButton.Padding = new Thickness(22, 10);
 
         var top = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
         top.Children.Add(_query);
@@ -84,7 +86,7 @@ internal sealed class SearchWindow : Window
         top.Children.Add(_searchButton);
 
         _results = new StackPanel { Spacing = 8 };
-        var scroller = new ScrollViewer { Content = _results, Margin = new Thickness(0, 12, 0, 12) };
+        var scroller = discovery is null ? new ScrollViewer { Content = _results, Margin = new Thickness(0, 12, 0, 12) } : null;
 
         _status = new TextBlock
         {
@@ -102,6 +104,7 @@ internal sealed class SearchWindow : Window
         _downloadAllButton = new Button { Content = "Queue all", IsEnabled = false, Margin = new Thickness(8, 0, 0, 0) };
         _downloadAllButton.Click += (_, _) => DownloadAll();
         var openFolder = new Button { Content = "Open folder", Margin = new Thickness(8, 0, 0, 0) };
+        _telegramButton.Classes.Add("finder-quiet"); openFolder.Classes.Add("finder-quiet");
         openFolder.Click += (_, _) => OpenFolder();
 
         var bottom = new StackPanel { Spacing = 8 };
@@ -110,6 +113,12 @@ internal sealed class SearchWindow : Window
         _telegramButton.Margin = _downloadAllButton.Margin = openFolder.Margin = new Thickness(0, 0, 8, 4);
         footerButtons.Children.Add(_telegramButton); footerButtons.Children.Add(_downloadAllButton); footerButtons.Children.Add(openFolder);
         bottom.Children.Add(footerButtons);
+        if (discovery is not null)
+        {
+            _downloadAllButton.IsVisible = false;
+            discovery.BotSearchRequested += () => StartSearch(true);
+            discovery.CatalogSelected += () => { _search?.Cancel(); _searchButton.IsEnabled = true; _downloadAllButton.IsVisible = false; _status.IsVisible = false; };
+        }
 
         _queueStatus=new TextBlock {TextWrapping=TextWrapping.Wrap,Opacity=0.8,Margin=new Thickness(0,8,0,4)};
         _queueProgress=new ProgressBar {Minimum=0,Maximum=100,Height=5,Margin=new Thickness(0,0,0,8)};
@@ -128,28 +137,26 @@ internal sealed class SearchWindow : Window
             _status.Text="Queue cleared. Downloaded files were kept.";ShowQueue();
         },text=>_status.Text=text);
         _queueTab=new TabItem {Header="Queue",Content=_queueView};
-        var tabs = new List<TabItem> { new() { Header = "Search", Content = scroller }, _queueTab };
+        var tabs = new List<TabItem> { new() { Header = "Search", Content = (Control?)discovery ?? scroller }, _queueTab };
         if (playlists is not null)
         {
             _playlistView = new PlaylistView(playlists, downloads, () => DownloadFolder, () => _telegram.IsLoggedIn);
             tabs.Add(new TabItem { Header = "Playlists", Content = _playlistView });
         }
-        if (discovery is not null) tabs.Add(new TabItem { Header = "Artists", Content = discovery });
         _tabs=new TabControl {ItemsSource=tabs};
         top.Margin = new Thickness(0, 0, 0, 12);
         var header = new StackPanel { Spacing = 6 };
-        header.Children.Add(new TextBlock { Text = "Free Music Finder", FontSize = 25, FontWeight = FontWeight.SemiBold });
-        header.Children.Add(FinderTheme.Caption("Find a song, discover artists, or bring your Spotify playlists into Noctis."));
+        header.Children.Add(new TextBlock { Text = "Free Music Finder", FontSize = 21, FontWeight = FontWeight.SemiBold });
         header.Children.Add(top); top.Margin = new Thickness(0, 8, 0, 0);
-        var root = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto"), Margin = new Thickness(20), RowSpacing = 12 };
+        var root = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto"), Margin = new Thickness(26, 20), RowSpacing = 12 };
         root.Children.Add(header);
         _queueCard = FinderTheme.Card(queuePanel, 12);
         Grid.SetRow(_queueCard,1);root.Children.Add(_queueCard);
         _tabs.SelectionChanged += (_, _) =>
         {
             top.IsVisible = _tabs.SelectedIndex == 0;
-            _downloadAllButton.IsVisible = _tabs.SelectedIndex == 0;
-            _status.IsVisible = _tabs.SelectedItem is not TabItem { Content: PlaylistView or DiscoveryView };
+            _downloadAllButton.IsVisible = _tabs.SelectedIndex == 0 && (_discovery is null || _discovery.BotMode);
+            _status.IsVisible = _tabs.SelectedItem is not TabItem { Content: PlaylistView } && (_discovery is null || _tabs.SelectedIndex != 0 || _discovery.BotMode);
             ShowQueue();
         };
         Grid.SetRow(_tabs, 2);
@@ -169,6 +176,7 @@ internal sealed class SearchWindow : Window
 
         // Downloads started before the window was last closed are still going.
         if (_downloads.Active.Count > 0) _status.Text = $"{_downloads.Active.Count} pending requests saved in the Queue tab.";
+        if (_discovery is not null) _status.IsVisible = false;
 
         _downloads.Changed += OnDownloadChanged;
         _downloads.Finished += OnDownloadsFinished;
@@ -235,12 +243,10 @@ internal sealed class SearchWindow : Window
 
     public void BrowseArtist(string name)
     {
-        if (_discovery is null) { Search(name); return; }
-        _tabs.SelectedItem = ((IEnumerable<TabItem>)_tabs.ItemsSource!).Single(t => ReferenceEquals(t.Content, _discovery));
-        _discovery.Search(name, openExact: true);
+        Search(name);
     }
 
-    private async void StartSearch()
+    private async void StartSearch(bool downloadBots = false)
     {
         try
         {
@@ -257,17 +263,25 @@ internal sealed class SearchWindow : Window
             _rows.Clear();
             _results.Children.Clear();
             _downloadAllButton.IsEnabled = false;
-            if (!_telegram.IsLoggedIn)
-            {
-                _status.Text = LoginFirst;
-                return;
-            }
+            _status.IsVisible = true;
             if(_transfers is not null && MusicLink.TryParse(query,out var musicLink))
             {
+                if (!_telegram.IsLoggedIn) { _status.Text = "Log in to Telegram to download this link. Catalog searches do not need a login."; return; }
                 var job=_transfers.Start(musicLink!.Url,DownloadFolder);
                 _status.Text=job.Status;_tabs.SelectedIndex=1;ShowQueue();return;
             }
             if(Uri.TryCreate(query,UriKind.Absolute,out _)) { _status.Text="Use a full Spotify or Deezer track, album or playlist link. Other links are not opened.";return; }
+
+            if (_discovery is not null && !downloadBots)
+            {
+                _searchButton.IsEnabled = true;
+                _downloadAllButton.IsVisible = false;
+                _status.IsVisible = false;
+                _discovery.Search(query);
+                return;
+            }
+            if (_discovery is not null) { _discovery.ShowBots(_results, query); _downloadAllButton.IsVisible = true; }
+            if (!_telegram.IsLoggedIn) { _status.Text = LoginFirst; return; }
 
             _searchButton.IsEnabled = false;
             _status.Text = "Searching…";
@@ -275,7 +289,7 @@ internal sealed class SearchWindow : Window
             {
                 // Task.Run keeps the waiting on the bot off the UI thread.
                 var tracks = await Task.Run(() => _searchBot(query, ct), ct);
-                if (search != _search) return; // a newer search took over
+                if (search != _search || _discovery is { BotMode: false }) return;
                 foreach (var track in tracks) AddRow(track);
                 var found = _rows.Count;
                 var owned = _rows.Count(r => r.InLibrary);
@@ -284,7 +298,7 @@ internal sealed class SearchWindow : Window
             }
             catch (Exception ex)
             {
-                if (search != _search || _closed.IsCancellationRequested) return;
+                if (search != _search || _closed.IsCancellationRequested || _discovery is { BotMode: false }) return;
                 _host.Log("search failed: " + ex.Message);
                 _status.Text = ex is OperationCanceledException ? "The bot did not answer."
                     : ex is TimeoutException or BotAnswerException or FormatException or ProxyRefusedException ? ex.Message
@@ -292,6 +306,7 @@ internal sealed class SearchWindow : Window
                     : "Search failed: " + ex.Message;
             }
 
+            if (search != _search) return;
             _searchButton.IsEnabled = true;
             ShowDownloadAll();
             ShowTelegramState(); // a search can find out that Telegram ended the session
@@ -336,7 +351,7 @@ internal sealed class SearchWindow : Window
         Grid.SetColumn(queueButton,2);grid.Children.Add(queueButton);
 
         _rows.Add(row);
-        _results.Children.Add(FinderTheme.Card(grid, 12));
+        var line = new Border { Child = grid, Padding = new Thickness(8, 10), CornerRadius = new CornerRadius(8) }; line.Classes.Add("finder-song"); _results.Children.Add(line);
     }
 
     /// <summary>
@@ -452,9 +467,9 @@ internal sealed class SearchWindow : Window
         _pauseButton.Content=held>0?"Start queued downloads":_downloads.Paused?"Resume queue":"Pause queue";
         // Coloured while there is something for it to start.
         _pauseButton.Classes.Set("finder-primary",held>0 || _downloads.Paused && pending>0);
-        _queueTab.Header=$"Queue ({pending+failed})";
+        _queueTab.Header=(_discovery is null ? "Queue" : "Downloads") + $" ({pending+failed})";
         _queueView.Refresh();
-        _queueCard.IsVisible = _tabs.SelectedIndex != 2 && (all.Count > 0 || _transfers?.Jobs.Any(j => !j.Complete) == true);
+        _queueCard.IsVisible = _tabs.SelectedItem is not TabItem { Content: PlaylistView } && ((_discovery is null ? all.Count : pending + failed) > 0 || _transfers?.Jobs.Any(j => !j.Complete) == true);
     }
 
     private void OpenFolder()
@@ -467,6 +482,7 @@ internal sealed class SearchWindow : Window
         }
         catch (Exception ex)
         {
+            _status.IsVisible = true;
             _status.Text = "Could not open the folder: " + ex.Message;
         }
     }

@@ -41,7 +41,7 @@ internal sealed partial class ArtistCatalog : IDisposable
         _folder = Path.GetFullPath(folder); _now = now ?? (() => DateTimeOffset.UtcNow);
         _applePace = applePace ?? TimeSpan.FromSeconds(3.1);
         _http = new HttpClient(handler ?? PlaylistCatalog.MetadataHandler("")) { Timeout = TimeSpan.FromSeconds(25) };
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("Noctis-FreeMusicFinder/2.8");
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("Noctis-FreeMusicFinder/2.9");
         try
         {
             if (SafeFile("limits.json") is {} path && File.Exists(path) && new FileInfo(path).Length < 16384)

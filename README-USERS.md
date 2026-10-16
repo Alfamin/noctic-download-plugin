@@ -9,6 +9,17 @@ You need: Noctis 1.5.3 or newer, a Telegram account, and the file
 
 ## 1. Install the zip
 
+**New in 2.9:** one **Search** tab for artists, songs and albums. Type a name or `song by artist`
+and press Enter. **All** shows the top match and related results; **Artists**, **Songs** and
+**Albums** narrow them. Artist searches include recent releases. Artist/album buttons open the
+normal Noctis pages. Songs show **Download now**, **Queue download**, or **In your library**.
+The filters keep context: searching a song and choosing **Artists** puts that song's credited
+performer first, ahead of unrelated literal-name matches. Hover for the song relationship;
+the tiles themselves show names, pictures and genres without redundant match labels.
+Browsing needs no Telegram login and never downloads audio. For unreleased songs or missing
+catalog entries, choose **Download bots** to use the original Telegram search. Catalog ranking
+comes from Deezer/Apple metadata and your local album evidence; it can differ from Spotify.
+
 **New in 2.8 (Noctis 1.6.3):** open any artist's normal Noctis page to see online albums and
 singles alongside your local releases. Click an album for its ordered track list. Owned songs
 play normally; missing songs show **Download now** and **Queue download**. Ctrl+click several
@@ -32,7 +43,7 @@ if unavailable. Opening another namesake from search won't change your local art
 1000px on Deezer). Artist photos also upgrade. Sharp images are cached; slow/failed upgrades
 keep the preview. Existing local/custom covers stay intact. No cache clearing is required.
 
-For an artist outside your library: Finder → **Artists** → search → **Open in Noctis**.
+For an artist outside your library: Finder → **Search** → search → **Open in Noctis**.
 If your local albums cannot distinguish namesakes, choose by picture and genre. Download progress
 is in Finder → **Queue**. Noctis must scan downloaded songs before they become playable.
 The native **Add to Queue** button still adds owned songs to the playback queue.

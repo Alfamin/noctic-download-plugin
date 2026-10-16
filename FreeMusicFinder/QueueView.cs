@@ -64,7 +64,8 @@ internal sealed class QueueView : Grid
             foreach (var item in visible)
             {
                 var row = new QueueRow(item, () => Act(() => _downloads.DownloadNext(item)), () => Act(() => _downloads.Remove(item)));
-                _rows.Add(item, row); _list.Children.Add(FinderTheme.Card(row, 12));
+                var line = new Border { Child = row, Padding = new Thickness(8, 6), CornerRadius = new CornerRadius(8) }; line.Classes.Add("finder-song");
+                _rows.Add(item, row); _list.Children.Add(line);
             }
             _visible = visible;
         }

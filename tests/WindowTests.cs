@@ -52,6 +52,7 @@ internal static class WindowTests
         QueueControls(host, LoggedIn(host), bot);
         QueueStart(host, bot);
         PlaylistTab(host, LoggedIn(host), bot);
+        UnifiedSearch(host, bot);
     }
 
     /// <summary>Songs queued from a playlist wait for a start of their own. The queue's one button gives it.</summary>
@@ -278,7 +279,7 @@ internal static class WindowTests
         File.SetLastWriteTimeUtc(dead, DateTime.UtcNow.AddHours(-1));
 
         var plugin = new FreeMusicPlugin((data, _) => DiscoveryTests.Catalog(data, new DiscoveryTests.Http()));
-        Check.Equal("2.8.4", plugin.Info.Version, "the version is the one in plugin.json");
+        Check.Equal("2.9.0", plugin.Info.Version, "the version is the one in plugin.json");
         plugin.Initialize(host);
         Check.Equal("Find more by this artist…", string.Join(",", host.Commands.Select(c => c.Label)), "one track menu entry");
         Check.Until(() => !File.Exists(dead), "what an interrupted download left behind is removed at the start");
@@ -293,7 +294,7 @@ internal static class WindowTests
         host.Commands[0].Handler(new TrackInfo("7", "Some Song", "Somebody", "", "", TimeSpan.Zero, 0, "", 0, "", false, 0, 0));
         Check.True(ReferenceEquals(window, Window()), "the menu entry uses the open window");
         var discovery = Field<DiscoveryView>(window!, "_discovery");
-        Check.Equal("Somebody", Field<TextBox>(discovery, "_query").Text, "and searches the online artist catalog");
+        Check.Equal("Somebody", Query(window!).Text, "and searches the same unified search box");
         Check.Until(() => discovery.GetVisualDescendants().OfType<Button>().Any(b => Equals(b.Content, "Open in Noctis →")), "catalog browsing needs no Telegram login");
 
         // A download that finishes while the window is closed is announced by the plugin itself.
@@ -438,6 +439,34 @@ internal static class WindowTests
         window.Close();
     }
 
+    private static void UnifiedSearch(FakeHost host, FakeBot bot)
+    {
+        Check.Section("complete unified Finder: one search box, catalog/bot switching and no duplicate Artists tab");
+        using var catalog = DiscoveryTests.Catalog(Check.NewFolder("integrated-unified"), UnifiedSearchTests.Http());
+        using var downloads = new Downloads(host.Log);
+        using var discovery = new DiscoveryView(() => catalog, _ => { });
+        var account = LoggedIn(host); var window = new SearchWindow(host, account, downloads, bot.SearchAsync, discovery: discovery); window.Show();
+        var tabs = Field<TabControl>(window, "_tabs");
+        Check.True(!tabs.Items.OfType<TabItem>().Any(t => Equals(t.Header, "Artists")), "Artists is a result filter rather than a separate top-level page");
+        window.Search("North Star");
+        Check.Until(() => discovery.GetVisualDescendants().OfType<TextBlock>().Any(t => t.Text?.StartsWith("2 artists") == true), "main search fills the integrated catalog results");
+        Check.Equal("North Star", Query(window).Text, "one visible search box retains the query for every filter");
+        Check.False(Field<Border>(window, "_queueCard").IsVisible, "empty queue does not consume search space");
+        bot.Answers["North Star"] = () => new[] { LogicTests.Track("Unreleased") };
+        discovery.SelectFilter("Download bots");
+        Check.Until(() => Rows(window).Count == 1 && Status(window).StartsWith("1 track"), "explicit bot filter uses the existing exact-selection result and download code");
+        bot.Answers["New bot query"] = () => new[] { LogicTests.Track("Another unreleased") };
+        Query(window).Text = "New bot query"; SearchButton(window).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check.Until(() => Rows(window).Count == 1 && Rows(window)[0].Title == "Another unreleased", "next manual search retains the selected bot filter");
+        Check.Equal("New bot query", discovery.Query, "bot search updates the shared query rather than retaining an older artist name");
+        discovery.SelectFilter("All");
+        Check.Until(() => !discovery.GetVisualDescendants().OfType<TextBlock>().Any(t => t.Text == "Another unreleased"), "returning to All removes the bot list without a second search window");
+        Check.Equal("New bot query", discovery.Query, "returning to catalog searches the query visible in the single search box");
+        Check.True(Field<Button>(window, "_searchButton").IsEnabled && !DownloadAll(window).IsVisible, "catalog controls are restored without a hidden bot Queue all action");
+        Picture(window, "51 unified full window");
+        window.Close();
+    }
+
     private sealed record RowView(string Title, string Details, Button Button);
 
     private static Grid Root(SearchWindow window) => (Grid)window.Content!;
@@ -506,7 +535,7 @@ internal static class WindowTests
     }
 
     /// <summary>Noctis, as far as the plugin uses it.</summary>
-    private sealed class FakeHost : IPluginHost, IPluginSettings, ILibraryReader
+    internal sealed class FakeHost : IPluginHost, IPluginSettings, ILibraryReader
     {
         public FakeHost(string noctisData, string musicFolder)
         {

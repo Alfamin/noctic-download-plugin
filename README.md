@@ -3,6 +3,24 @@
 Finds songs and imports Spotify/Deezer playlists through Music Hunters and DeezLoad using
 your own Telegram account, from inside [Noctis](https://github.com/heartached/Noctis).
 
+Version **2.9.0** combines song and artist search into one **Search** tab. Search an artist,
+album, or `song by artist`; **All**, **Artists**, **Songs** and **Albums** filter the same
+results. A relevant top result leads the page; artist queries include recent releases.
+Artists and albums open Noctis's existing native pages. Song results show owned/queued state
+and explicit **Download now** / **Queue download** actions. No Telegram login is required to
+browse. **Download bots** keeps the original Music Hunters/DeezLoad search available for
+unreleased material. Catalog results come from Deezer/Apple, so their ranking and coverage
+can differ from Spotify. Sections load progressively, reuse saved metadata, respect provider
+limits and use the existing proxy route. No AI service, Spotify account or new dependency.
+The window uses a larger top-result panel, artwork shelves, round artist tiles, compact song
+and download rows, and light/dark styling. Narrow layouts wrap actions; idle completed queues
+do not cover search results. Public catalog searches preserve provider relevance rather than
+sorting every album by its release date, and exact artist-ID lookups fill artist song results.
+Result filters retain context: **Artists** for a song/album includes its credited performers,
+ranked ahead of incidental name matches using the same search results. Small artists remain
+selectable. Relationships and local matching evidence stay in hover tips; the visible cards
+use artwork, name and genre rather than redundant “top match” explanations.
+
 Version **2.8** fills Noctis's existing artist release sections and album pages with online
 catalog metadata. The native grids, tabs and track-row templates stay in use. Missing songs
 have **Download now** and **Queue download** actions; Ctrl+click selects several for download.
@@ -115,7 +133,7 @@ was closed in the middle of it is removed at the next start.
 
 Open a normal Noctis artist page. **Albums**, **Singles & EPs**, and **Appears On** keep their
 native layout and gain releases returned by the catalog. Local-only releases remain. To find
-an artist you do not own, open Finder → **Artists**, search, and choose **Open in Noctis**.
+an artist you do not own, open Finder → **Search**, search, and choose **Open in Noctis**.
 If several artists share a name, known local albums identify the matching catalog when possible.
 Otherwise, choose by picture and genre; that explicit local-page choice is saved. Finder search
 visits remain separate. Small artists are never rejected just for having fewer listeners.

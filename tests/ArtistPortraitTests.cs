@@ -62,12 +62,13 @@ internal static class ArtistPortraitTests
         CatalogArtist? opened = null;
         using var view = new DiscoveryView(() => catalog, artist => opened = artist, _ => new[] { "Thank Me Later" });
         var window = new Window { Content = view, Width = 860, Height = 500 }; window.Show(); view.Search("Drake");
-        Check.Until(() => view.GetVisualDescendants().OfType<TextBlock>().Any(t => t.Text?.StartsWith("Matches your library") == true), "artist matching uses library evidence and shows it on the result");
-        Check.Until(() => view.GetVisualDescendants().OfType<Avalonia.Controls.Image>().Count(i => i.Source is not null) == 2, "both artist rows show decoded round portraits");
+        Check.Until(() => view.GetVisualDescendants().OfType<Border>().Any(b => ToolTip.GetTip(b)?.ToString()?.StartsWith("Matches your library") == true), "artist matching uses library evidence and keeps its explanation available on hover");
+        view.SelectFilter("Artists");
+        Check.Until(() => view.GetVisualDescendants().OfType<Avalonia.Controls.Image>().Count(i => i.Source is not null && i.Clip is Avalonia.Media.EllipseGeometry) == 2, "both artist results show decoded round portraits");
         var labels = view.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text ?? "").ToArray();
-        Check.True(labels.Any(t => t == "Different artist with the same name"), "search explicitly labels the other namesake");
+        Check.True(labels.Contains("Hip-Hop/Rap") && labels.Contains("Dance"), "namesake tiles use their actual genres and pictures instead of explanatory match badges");
         Check.True(!labels.Any(t => t.Contains("apple:") || t.Contains("271256") || t.Contains("1147300457")), "raw provider IDs are absent from visible search rows");
-        var buttons = view.GetVisualDescendants().OfType<Button>().Where(b => Equals(b.Content, "Open in Noctis →")).ToArray();
+        var buttons = view.GetVisualDescendants().OfType<Button>().Where(b => Equals(b.Content, "Open in Noctis →") || Avalonia.Automation.AutomationProperties.GetName(b)?.Contains("artist in Noctis") == true).ToArray();
         buttons[0].RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Check.Equal(actual.Id, opened?.Id, "library-matched artist is the first action, even when provider namesake was first");
         buttons[1].RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Check.Equal(other.Id, opened?.Id, "separate namesake remains deliberately selectable");
         if (!string.IsNullOrEmpty(pictures))
