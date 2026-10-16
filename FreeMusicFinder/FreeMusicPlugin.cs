@@ -21,6 +21,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     private const string ProxyKey = "proxy";
     private const string ShortcutKey = "shortcut";
     private const string AllowMp3Key = "allowMp3";
+    private const string LastFmKey = "lastfmApiKey";
     internal const string DownloadFolderKey = "downloadFolder";
 
     private readonly List<IDisposable> _registrations = new();
@@ -41,6 +42,8 @@ public sealed class FreeMusicPlugin : INoctisPlugin
     private readonly Func<string, string, ArtistCatalog> _catalogFactory;
     private ForYouSource? _forYou;
     private SimilarArtists? _similar;
+    private LastFmSimilar? _lastFm;
+    private volatile string _lastFmKey = "";
 
     public FreeMusicPlugin() : this((folder, proxy) => new ArtistCatalog(folder, PlaylistCatalog.MetadataHandler(proxy))) { }
     internal FreeMusicPlugin(Func<string, string, ArtistCatalog> catalogFactory) => _catalogFactory = catalogFactory;
@@ -58,6 +61,7 @@ public sealed class FreeMusicPlugin : INoctisPlugin
         _host = host;
         _proxy = host.Settings.GetString(ProxyKey) ?? "";
         _allowMp3 = host.Settings.GetBool(AllowMp3Key, true);
+        _lastFmKey = host.Settings.GetString(LastFmKey)?.Trim() ?? "";
         _telegram = new TelegramAccount(Path.Combine(host.DataDirectory, "telegram.dat"), () => _proxy, Log);
         _bot = new MusicSources(new HunterMusicSource(_telegram,Log),new DeezLoadSource(_telegram,Announce),Announce,
             Path.Combine(host.DataDirectory,"source-limits.json"),allowMp3:()=>_allowMp3);
@@ -68,11 +72,14 @@ public sealed class FreeMusicPlugin : INoctisPlugin
             new PlaylistCatalog(PlaylistCatalog.MetadataHandler(_proxy, Log)));
         _catalog = CreateCatalog();
         _similar = CreateSimilar();
+        _lastFm = CreateLastFm();
+        if (_lastFmKey.Length > 0 && !LastFmSimilar.ValidKey(_lastFmKey)) Announce("Last.fm API key not understood: paste the 32-character API key, not the secret. For you will use the other catalogs.");
         _discoveryActions = new DiscoveryActions(new PlaylistLibrary(), _downloads, _bot.Track,
             () => Downloader.Folder(host.Settings.GetString(DownloadFolderKey), host.DataDirectory), () => _telegram?.IsLoggedIn == true);
         _artistPages = new NativeCatalogPages(() => _catalog!, _discoveryActions, Log, () => _host?.Settings.GetBool("artistCatalogOnPages", true) == true, choicesPath: Path.Combine(host.DataDirectory, "artist-catalog", "artist-choices.json"));
         _forYou = new ForYouSource(() => _catalog ?? throw new InvalidOperationException("Free Music Finder has stopped."), _discoveryActions,
-            name => _artistPages?.LocalAlbums(name) ?? [], new PlaylistLibrary(), NoctisDataOf(host.DataDirectory), Path.Combine(host.DataDirectory, "for-you-hidden.json"), () => _similar);
+            DiscoverAlbums, new PlaylistLibrary(), NoctisDataOf(host.DataDirectory), Path.Combine(host.DataDirectory, "for-you-hidden.json"), () => _similar, () => _lastFm);
+        _forYou.WarmUp();
         _transfers.Changed += Announce;
         _downloads.Finished += Announce;
 
@@ -109,10 +116,12 @@ public sealed class FreeMusicPlugin : INoctisPlugin
 
         _window?.Close();
         _window = null;
+        _forYou?.Dispose(); _forYou = null;
         _artistPages?.Dispose(); _artistPages = null;
         _catalog?.Dispose(); _catalog = null;
-        _discoveryActions = null; _forYou = null;
+        _discoveryActions = null;
         _similar?.Dispose(); _similar = null;
+        _lastFm?.Dispose(); _lastFm = null;
         _playlists?.Dispose(); _playlists = null;
         if (_downloads is not null) _downloads.Finished -= Announce;
         _downloads?.Dispose();
@@ -139,6 +148,14 @@ public sealed class FreeMusicPlugin : INoctisPlugin
             _catalog?.Dispose();
             _catalog = CreateCatalog();
             _similar?.Dispose(); _similar = CreateSimilar();
+            _lastFm?.Dispose(); _lastFm = CreateLastFm();
+        }
+        else if (key == LastFmKey)
+        {
+            _lastFmKey = _host?.Settings.GetString(LastFmKey)?.Trim() ?? "";
+            _lastFm?.Dispose(); _lastFm = CreateLastFm();
+            if (_lastFmKey.Length > 0 && !LastFmSimilar.ValidKey(_lastFmKey)) Announce("Last.fm API key not understood: paste the 32-character API key, not the secret. For you will use the other catalogs.");
+            _forYou?.Forget();
         }
         else if (key == ShortcutKey) ApplyShortcut();
         else if (key == AllowMp3Key) _allowMp3 = _host?.Settings.GetBool(AllowMp3Key, true) ?? true;
@@ -168,6 +185,10 @@ public sealed class FreeMusicPlugin : INoctisPlugin
 
     private ArtistCatalog CreateCatalog() => _catalogFactory(Path.Combine(_host!.DataDirectory, "artist-catalog"), _proxy);
     private SimilarArtists CreateSimilar() => new(Path.Combine(_host!.DataDirectory, "artist-catalog"), PlaylistCatalog.MetadataHandler(_proxy, Log));
+    private LastFmSimilar CreateLastFm() => new(Path.Combine(_host!.DataDirectory, "artist-catalog"), PlaylistCatalog.MetadataHandler(_proxy, Log), () => _lastFmKey);
+    private IReadOnlyList<string> DiscoverAlbums(string name) => Dispatcher.UIThread.CheckAccess()
+        ? _artistPages?.LocalAlbums(name) ?? []
+        : Dispatcher.UIThread.InvokeAsync(() => _artistPages?.LocalAlbums(name) ?? []).GetAwaiter().GetResult();
     private DiscoveryView CreateDiscovery() => new(() => _catalog ?? throw new InvalidOperationException("Free Music Finder has stopped."),
         artist => { _artistPages!.OpenArtist(artist); _window?.Close(); }, name => _artistPages?.LocalAlbums(name) ?? [],
         _discoveryActions, async (album, ct) => { await _artistPages!.OpenAlbumAsync(album, ct); _window?.Close(); }, _forYou);

@@ -14,7 +14,7 @@ internal sealed record SimilarArtist(string Name, double Score);
 /// </summary>
 internal sealed class SimilarArtists : IDisposable
 {
-    public const string UserAgent = "NoctisFreeMusicFinder/2.10 ( https://github.com/Alfamin/noctic-download-plugin )";
+    public const string UserAgent = "NoctisFreeMusicFinder/2.11 ( https://github.com/Alfamin/noctic-download-plugin )";
     private const string Algorithm = "session_based_days_7500_session_300_contribution_5_threshold_10_limit_100_filter_True_skip_30";
     private static readonly TimeSpan KeepFound = TimeSpan.FromDays(180), KeepMissing = TimeSpan.FromDays(7), KeepSimilar = TimeSpan.FromDays(14);
     private readonly HttpClient _http;
@@ -134,18 +134,21 @@ internal sealed class SimilarArtists : IDisposable
 
     private void Remember(Action change)
     {
-        string json;
-        lock (_lock) { change(); json = JsonSerializer.Serialize(_saved); }
-        try
+        // Parallel seed queries can finish in any order. Keep mutation and atomic publication together so an older
+        // snapshot cannot overwrite a newer one after restart.
+        lock (_lock)
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
-            if (File.Exists(_path) && (File.GetAttributes(_path) & FileAttributes.ReparsePoint) != 0) return;
-            var temp = _path + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp";
-            File.WriteAllText(temp, json);
-            File.Move(temp, _path, overwrite: true);
+            change();
+            try
+            {
+                var dir = new DirectoryInfo(Path.GetDirectoryName(_path)!);
+                for (var ancestor = dir; ancestor is not null; ancestor = ancestor.Parent)
+                    if (ancestor.Exists && (ancestor.Attributes & FileAttributes.ReparsePoint) != 0) return;
+                AtomicJson.Write(_path, _saved);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 
-    public void Dispose() { _http.Dispose(); _musicBrainz.Dispose(); }
+    public void Dispose() => _http.Dispose(); // in-flight calls still release their gate when a proxy changes
 }

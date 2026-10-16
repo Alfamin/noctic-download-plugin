@@ -15,7 +15,7 @@ internal sealed record TasteSeed(string Name, double Weight, int Owned, IReadOnl
 /// <summary>A song the listener does not have yet, and why it was picked.</summary>
 internal sealed record DiscoverSong(CatalogSearchSong Track, double Score, string Because);
 internal sealed record DiscoverArtist(CatalogArtist Artist, string Because);
-internal sealed record DiscoverResult(List<DiscoverSong> Songs, List<DiscoverArtist> Artists, string Notice);
+internal sealed record DiscoverResult(List<DiscoverSong> Songs, List<DiscoverArtist> Artists, string Notice, bool LastFm = false);
 
 /// <summary>The listener's taste in artists, from what they play and what they own. Nothing leaves the computer.</summary>
 internal static class Taste
@@ -164,6 +164,8 @@ internal static class TasteSources
 /// <summary>What Discover needs from the catalog (an interface, so the ranking can be tested without a network).</summary>
 internal interface IDiscoverCatalog
 {
+    string Notice => "";
+    bool HasLastFm => false;
     /// <summary>The catalog artist for one of the listener's artists, or null when the name is ambiguous (never a guessed namesake).</summary>
     Task<CatalogArtist?> FindAsync(TasteSeed seed, CancellationToken ct);
     /// <summary>The catalog artist with exactly this name (a similar artist, known by name).</summary>
@@ -171,14 +173,22 @@ internal interface IDiscoverCatalog
     /// <summary>Artists whose listeners also play this one, most similar first.</summary>
     Task<List<SimilarArtist>> SimilarAsync(TasteSeed seed, CatalogArtist? artist, CancellationToken ct);
     Task<List<CatalogSearchSong>> TopSongsAsync(CatalogArtist artist, CancellationToken ct);
+    async Task<CatalogArtistSongs> SongsByNameAsync(string name, CancellationToken ct)
+    {
+        var artist = await FindByNameAsync(name, ct);
+        return new(artist, artist is null ? [] : await TopSongsAsync(artist, ct));
+    }
 }
 
 /// <summary>
 /// The real catalog: the listener's artists identified with their own albums (namesake-safe); similar artists from
 /// ListenBrainz (and Deezer's related artists when Deezer can be reached); songs from the music catalog (Deezer, else Apple).
 /// </summary>
-internal sealed class CatalogForDiscover(Func<ArtistCatalog> catalog, Func<string, IReadOnlyList<string>> localAlbums, Func<SimilarArtists?> similar) : IDiscoverCatalog
+internal sealed class CatalogForDiscover(Func<ArtistCatalog> catalog, Func<string, IReadOnlyList<string>> localAlbums, Func<SimilarArtists?> similar,
+    Func<LastFmSimilar?>? lastFm = null) : IDiscoverCatalog
 {
+    public string Notice => lastFm?.Invoke()?.Notice ?? "";
+    public bool HasLastFm => lastFm?.Invoke()?.Enabled == true;
     public async Task<CatalogArtist?> FindAsync(TasteSeed seed, CancellationToken ct) => (await catalog().IdentifyAsync(seed.Name, localAlbums(seed.Name), null, ct)).Artist;
     public async Task<CatalogArtist?> FindByNameAsync(string name, CancellationToken ct)
         => (await catalog().SearchAsync(name, false, ct)).Value.FirstOrDefault(a => BotText.Key(a.Name) == BotText.Key(name));
@@ -186,6 +196,15 @@ internal sealed class CatalogForDiscover(Func<ArtistCatalog> catalog, Func<strin
     {
         var result = new List<SimilarArtist>();
         Exception? failure = null;
+        if (lastFm?.Invoke() is { Enabled: true } last)
+        {
+            try
+            {
+                result = LastFmSimilar.Filter(await last.SimilarAsync(seed.Name, ct), seed.Name, []);
+                if (result.Count > 0) return result;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested) { failure = ex; }
+        }
         if (similar() is { } listenBrainz)
         {
             try
@@ -193,6 +212,12 @@ internal sealed class CatalogForDiscover(Func<ArtistCatalog> catalog, Func<strin
                 if (await listenBrainz.ArtistIdAsync(seed.Name, seed.SongTitles, ct) is { } mbid) result.AddRange(await listenBrainz.SimilarAsync(mbid, ct));
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested) { failure = ex; }
+        }
+        // Keyless/empty-provider fallback only. Successful Last.fm seeds never wait for a catalog identity lookup.
+        if (result.Count == 0 && artist is null)
+        {
+            try { artist = await FindAsync(seed, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested) { failure ??= ex; }
         }
         if (artist is not null && artist.Id.StartsWith("deezer:", StringComparison.Ordinal))
         {
@@ -208,6 +233,7 @@ internal sealed class CatalogForDiscover(Func<ArtistCatalog> catalog, Func<strin
         return result;
     }
     public async Task<List<CatalogSearchSong>> TopSongsAsync(CatalogArtist artist, CancellationToken ct) => (await catalog().ArtistSongsAsync(artist, ct)).Value;
+    public async Task<CatalogArtistSongs> SongsByNameAsync(string name, CancellationToken ct) => (await catalog().SongsByArtistNameAsync(name, ct)).Value;
 }
 
 /// <summary>
@@ -244,24 +270,24 @@ internal static class Discover
         var used = seeds.Take(SeedArtistsUsed).ToList();
         foreach (var seed in used) own.Add(BotText.Key(seed.Name));
         var lists = new List<(TasteSeed Seed, List<SimilarArtist> Similar)>();
-        for (int i = 0; i < used.Count; i++)
+        int complete = 0;
+        using var concurrent = new SemaphoreSlim(3, 3);
+        var relations = await Task.WhenAll(used.Select(async seed =>
         {
-            ct.ThrowIfCancellationRequested();
-            var seed = used[i];
-            progress?.Report($"Finding artists like the ones you play… {i + 1} of {used.Count}");
-            CatalogArtist? artist = null;
-            try { artist = await catalog.FindAsync(seed, ct); }
-            catch (Exception ex) when (ex is not OperationCanceledException) { failed++; lastError = ArtistCatalog.Explain(ex); }
-            // Liking a lot is a voice, not a veto: the square root keeps one favorite from drowning out the rest.
-            double voice = Math.Sqrt(Math.Max(0, seed.Weight));
-            if (artist is not null && !hidden.HidesArtist(artist.Id)) { resolved[BotText.Key(seed.Name)] = artist; Add(seed.Name, voice * 0.6, seed.Name); }
+            await concurrent.WaitAsync(ct);
             try
             {
-                var similar = await catalog.SimilarAsync(seed, artist, ct);
-                if (artist is not null || similar.Count > 0) found++;
-                lists.Add((seed, similar.Take(40).ToList()));
+                return (Seed: seed, Similar: LastFmSimilar.Filter(await catalog.SimilarAsync(seed, null, ct), seed.Name, used.Select(s => s.Name)).Take(40).ToList(), Error: "");
             }
-            catch (Exception ex) when (ex is not OperationCanceledException) { failed++; lastError = ArtistCatalog.Explain(ex); if (artist is not null) found++; }
+            catch (Exception ex) when (ex is not OperationCanceledException) { return (Seed: seed, Similar: new List<SimilarArtist>(), Error: ArtistCatalog.Explain(ex)); }
+            finally { progress?.Report($"Finding artists like the ones you play… {Interlocked.Increment(ref complete)} of {used.Count}"); concurrent.Release(); }
+        }));
+        // Merge in seed order, not completion order: network timing must not change ranking or reasons.
+        foreach (var row in relations)
+        {
+            if (row.Error.Length > 0) { failed++; lastError = row.Error; }
+            lists.Add((row.Seed, row.Similar));
+            Add(row.Seed.Name, Math.Sqrt(Math.Max(0, row.Seed.Weight)) * 0.6, row.Seed.Name);
         }
         // An artist on nearly every list (the biggest names) says little about this listener: it counts for less.
         var onLists = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -277,24 +303,31 @@ internal static class Discover
                 Add(other.Name, voice * (0.4 + 0.6 * other.Score) * (1 - j / 60.0) / (1 + 0.6 * (common - 1)), seed.Name);
             }
         }
-        if (found == 0)
-            return new([], [], failed > 0 ? "For you could not reach the music catalogs: " + lastError : "None of your artists could be matched in the catalogs yet.");
-
         var ranked = score.OrderByDescending(s => s.Value).Take(CandidateArtists).ToList();
         var songs = new List<(CatalogSearchSong Track, double Score, string Key)>();
         for (int k = 0; k < ranked.Count; k++)
         {
             ct.ThrowIfCancellationRequested();
             var (key, value) = ranked[k];
-            progress?.Report($"Picking songs you don't have… {k + 1} of {ranked.Count} (the first time takes a few minutes)");
+            progress?.Report($"Picking songs you don't have… {k + 1} of {ranked.Count}");
             try
             {
-                if (!resolved.TryGetValue(key, out var artist))
+                CatalogArtist? artist;
+                List<CatalogSearchSong> candidates;
+                if (own.Contains(key))
                 {
-                    if (await catalog.FindByNameAsync(display[key], ct) is not { } byName || hidden.HidesArtist(byName.Id)) continue;
-                    resolved[key] = artist = byName;
+                    artist = await catalog.FindAsync(used.First(s => BotText.Key(s.Name) == key), ct);
+                    if (artist is null || hidden.HidesArtist(artist.Id)) continue;
+                    candidates = await catalog.TopSongsAsync(artist, ct);
                 }
-                var top = (await catalog.TopSongsAsync(artist, ct)).Where(s => !hidden.HidesSong(s.Song.Id)).Take(SongsPerArtist).ToList();
+                else
+                {
+                    var relatedSongs = await catalog.SongsByNameAsync(display[key], ct);
+                    artist = relatedSongs.Artist; candidates = relatedSongs.Songs;
+                    if (artist is null || hidden.HidesArtist(artist.Id)) continue;
+                }
+                resolved[key] = artist; found++;
+                var top = candidates.Where(s => !hidden.HidesSong(s.Song.Id)).Take(SongsPerArtist).ToList();
                 for (int n = 0; n < top.Count; n++) songs.Add((top[n], value * (1 - 0.07 * n), key));
             }
             catch (Exception ex) when (ex is not OperationCanceledException) { failed++; lastError = ArtistCatalog.Explain(ex); }
@@ -321,9 +354,12 @@ internal static class Discover
         }
         var newArtists = ranked.Where(r => !own.Contains(r.Key) && resolved.ContainsKey(r.Key)).Take(12)
             .Select(r => new DiscoverArtist(resolved[r.Key], "Similar to " + because[r.Key].Seed)).ToList();
-        var notice = result.Count == 0 ? "Everything For you found is already in your library or download queue. Refresh after listening some more."
+        var notice = found == 0 ? failed > 0 ? "For you could not reach the music catalogs: " + lastError : "None of your artists could be matched in the catalogs yet."
+            : result.Count == 0 ? songs.Count == 0 ? "The catalogs returned no usable song suggestions this time. Try refreshing later."
+                : "Everything For you found is already in your library or download queue. Refresh after listening some more."
             : failed > 0 ? $"Some artists could not be loaded ({lastError}); these are from the rest." : "";
-        return new(result, newArtists, notice);
+        if (catalog.Notice.Length > 0) notice = (notice + " " + catalog.Notice).Trim();
+        return new(result, newArtists, notice, catalog.HasLastFm);
     }
 }
 
@@ -383,24 +419,96 @@ internal sealed class DiscoverHidden
 
 /// <summary>For you as the plugin offers it: the listener's taste, the catalog, the library check and the dismissed songs.</summary>
 internal sealed class ForYouSource(Func<ArtistCatalog> catalog, DiscoveryActions? actions, Func<string, IReadOnlyList<string>> localAlbums,
-    IPlaylistLibrary library, string? noctisData, string hiddenPath, Func<SimilarArtists?>? similar = null)
+    IPlaylistLibrary library, string? noctisData, string hiddenPath, Func<SimilarArtists?>? similar = null,
+    Func<LastFmSimilar?>? lastFm = null, Func<DateTimeOffset>? now = null) : IDisposable
 {
-    private (DiscoverResult Result, DateTime At)? _last;
+    private readonly Func<DateTimeOffset> _now = now ?? (() => DateTimeOffset.UtcNow);
+    private readonly ForYouCache _cache = new(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(hiddenPath))!, "for-you-last.json"));
+    private readonly SemaphoreSlim _build = new(1, 1);
+    private readonly object _sync = new();
+    private readonly CancellationTokenSource _lifetime = new();
+    private ForYouCache.Page? _last;
+    private bool _loaded, _warming, _disposed;
+    private long _revision, _invalidation;
     public DiscoverHidden Hidden { get; } = new(hiddenPath);
+    public bool UsesLastFm => lastFm?.Invoke()?.Enabled == true;
+    public event Action<DiscoverResult>? PicksReady;
+
+    public Task<DiscoverResult?> SavedAsync(CancellationToken ct) => Task.Run(() =>
+    {
+        ct.ThrowIfCancellationRequested();
+        lock (_sync)
+        {
+            if (!_loaded) { _last = _cache.Read(_now()); _loaded = true; }
+            return _last is { } page && page.Until > _now() ? Filter(page.Result) : null;
+        }
+    }, ct);
+
+    private DiscoverResult Filter(DiscoverResult result) => result with
+    {
+        Songs = result.Songs.Where(s => !Hidden.HidesSong(s.Track.Song.Id) && !s.Track.Song.Artists.Any(a => Hidden.HidesArtist(a.Id))).ToList(),
+        Artists = result.Artists.Where(a => !Hidden.HidesArtist(a.Artist.Id)).ToList(),
+    };
 
     public async Task<DiscoverResult> BuildAsync(bool refresh, IProgress<string>? progress, CancellationToken ct)
     {
-        if (!refresh && _last is { } last && DateTime.UtcNow - last.At < TimeSpan.FromMinutes(30)) return last.Result;
-        progress?.Report("Learning your taste…");
-        var songs = await library.SnapshotAsync();
-        var plays = await Task.Run(() => TasteSources.Load(noctisData), ct);
-        var seeds = Taste.Seeds(plays, songs, DateTime.UtcNow);
-        var result = await Discover.BuildAsync(seeds, new CatalogForDiscover(catalog, localAlbums, similar ?? (() => null)), Unavailable, Hidden, progress, ct);
-        _last = (result, DateTime.UtcNow);
-        return result;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _lifetime.Token); ct = linked.Token;
+        await SavedAsync(ct);
+        long revision; lock (_sync) revision = _revision;
+        await _build.WaitAsync(ct);
+        try
+        {
+            long invalidation;
+            lock (_sync)
+            {
+                if (_disposed) throw new OperationCanceledException(ct);
+                if (_last is { } last && last.Until > _now() && (_revision != revision || !refresh && _now() - last.At < TimeSpan.FromHours(12))) return Filter(last.Result);
+                invalidation = _invalidation;
+            }
+            progress?.Report("Learning your taste…");
+            var songs = await library.SnapshotAsync();
+            var plays = await Task.Run(() => TasteSources.Load(noctisData), ct);
+            var seeds = Taste.Seeds(plays, songs, _now().UtcDateTime);
+            var result = await Discover.BuildAsync(seeds, new CatalogForDiscover(catalog, localAlbums, similar ?? (() => null), lastFm), Unavailable, Hidden, progress, ct);
+            ct.ThrowIfCancellationRequested();
+            lock (_sync)
+            {
+                if (_disposed || invalidation != _invalidation) return Filter(result);
+                // A transient outage never replaces a useful offline page with an empty failure.
+                if (result.Songs.Count > 0)
+                {
+                    var until = _now().AddDays(7);
+                    if (lastFm?.Invoke() is { } last && last.DataExpires < until) until = last.DataExpires;
+                    _last = new(1, _now(), until, result); _revision++;
+                    if (until > _now()) _cache.Write(_last);
+                }
+            }
+            PicksReady?.Invoke(result);
+            return Filter(result);
+        }
+        finally { _build.Release(); }
     }
 
-    public void Forget() => _last = null;
+    public void Forget() { lock (_sync) { _last = null; _invalidation++; } }
+
+    /// <summary>Metadata only; delayed so startup and the library scan keep priority. One build per source.
+    /// The view decides when to adopt it, so a background result cannot move rows under the pointer.</summary>
+    public void WarmUp(TimeSpan? delay = null)
+    {
+        lock (_sync) { if (_warming || _disposed) return; _warming = true; }
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delay ?? TimeSpan.FromSeconds(20), _lifetime.Token);
+                await BuildAsync(false, null, _lifetime.Token);
+            }
+            catch (Exception) { /* Keep the saved page; the next foreground refresh reports exact provider failures. */ }
+            finally { lock (_sync) _warming = false; }
+        });
+    }
+
+    public void Dispose() { lock (_sync) _disposed = true; _lifetime.Cancel(); }
 
     private async Task<HashSet<string>> Unavailable(IReadOnlyList<CatalogSong> songs, CancellationToken ct)
     {

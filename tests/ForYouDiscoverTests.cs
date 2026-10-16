@@ -223,6 +223,7 @@ internal static class ForYouDiscoverTests
                     "/artist/42/related" => new { data = new[] { new { id = 50, name = "Close One" } } },
                     "/artist/42/top" => new { data = new[] { Song(42, "North Star", 501, "Star Song") } },
                     "/artist/50/top" => new { data = new[] { Song(50, "Close One", 601, "Close Song"), Song(50, "Close One", 602, "Close Two") } },
+                    "/search/track" => new { data = new[] { Song(50, "Close One", 601, "Close Song"), Song(50, "Close One", 602, "Close Two") } },
                     _ => new { data = Array.Empty<object>() },
                 };
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(body)) });
@@ -257,8 +258,53 @@ internal static class ForYouDiscoverTests
         var chip = view.GetVisualDescendants().OfType<Button>().First(b => b.Classes.Contains("finder-primary"));
         ((Avalonia.Controls.IPseudoClasses)chip.Classes).Add(":pointerover"); Dispatcher.UIThread.RunJobs();
         var inside = chip.GetVisualDescendants().OfType<Avalonia.Controls.Presenters.ContentPresenter>().FirstOrDefault(p => p.Name == "PART_ContentPresenter");
-        Check.True(inside?.Background is Avalonia.Media.ISolidColorBrush under && chip.Background is Avalonia.Media.ISolidColorBrush own && under.Color == own.Color,
-            "the chosen filter keeps its colour while the pointer is still on it");
+        // The real Noctis theme animates the Button.Background for 60 ms; its initial brush is not its final state.
+        Check.Until(() => inside?.Background is Avalonia.Media.ISolidColorBrush under && chip.Background is Avalonia.Media.ISolidColorBrush own && under.Color == own.Color,
+            "the chosen filter keeps its colour under the pointer after the native brush transition");
+        ((Avalonia.Controls.IPseudoClasses)chip.Classes).Add(":pressed"); Dispatcher.UIThread.RunJobs();
+        Check.Until(() => inside?.Background is Avalonia.Media.ISolidColorBrush under && chip.Background is Avalonia.Media.ISolidColorBrush own && under.Color == own.Color,
+            "the chosen filter also keeps its colour while pressed");
+        window.Close();
+        SavedUi();
+    }
+
+    private static void SavedUi()
+    {
+        Check.Section("For you saved page and background refresh");
+        var folder = Check.NewFolder("for-you-saved-ui");
+        var now = DateTimeOffset.UtcNow;
+        new ForYouCache(Path.Combine(folder, "for-you-last.json")).Write(new(1, now, now.AddDays(1), LastFmDiscoverTests.Page()));
+        File.WriteAllText(Path.Combine(folder, "play_history.json"), JsonSerializer.Serialize(new[] { new { Artist = "North Star", Title = "Own", PlayedAtUtc = now.UtcDateTime, Skipped = false } }));
+        bool block = false;
+        var http = new DiscoveryTests.Http { Override = async (r, ct) =>
+        {
+            if (block) await Task.Delay(Timeout.Infinite, ct);
+            object body = r.RequestUri!.AbsolutePath switch
+            {
+                "/search/artist" => new { data = new[] { new { id = 42, name = "North Star" } } },
+                "/artist/42/related" => new { data = new[] { new { id = 50, name = "Close One" } } },
+                "/artist/42/top" => new { data = new[] { Song(42, "North Star", 501, "Star Song") } },
+                "/search/track" => new { data = new[] { Song(50, "Close One", 601, "Close Song") } },
+                _ => new { data = Array.Empty<object>() },
+            };
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(body)) };
+        } };
+        using var catalog = DiscoveryTests.Catalog(Path.Combine(folder, "catalog"), http);
+        using var source = new ForYouSource(() => catalog, null, _ => [], new SpotifyPlaylistTests.Library(), folder, Path.Combine(folder, "hidden.json"));
+        using var view = new DiscoveryView(() => catalog, _ => { }, forYou: source);
+        var window = new Window { Content = view, Width = 800, Height = 650 }; FinderTheme.Apply(window); window.Show();
+        Check.Until(() => Text(view).Contains("Saved song"), "a previous session's picks appear immediately without rebuilding");
+        Check.Equal(0, http.Calls.Count, "a fresh saved page makes no provider request on open");
+        var build = Task.Run(() => source.BuildAsync(true, null, CancellationToken.None));
+        Check.Until(() => view.GetVisualDescendants().OfType<Button>().Any(b => Equals(b.Content, "New picks ready")), "a background result offers New picks ready");
+        Check.True(Text(view).Contains("Saved song") && !Text(view).Contains("Star Song"), "background refresh never replaces rows under the listener's pointer");
+        view.GetVisualDescendants().OfType<Button>().First(b => Equals(b.Content, "New picks ready")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check.Until(() => Text(view).Contains("Star Song") && !Text(view).Contains("Saved song"), "the listener adopts prepared picks with one click");
+        source.Forget(); block = true;
+        view.GetVisualDescendants().OfType<Button>().First(b => Equals(b.Content, "Refresh")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check.True(Text(view).Contains("Star Song"), "foreground refresh keeps the previous list visible");
+        view.SelectFilter("All"); view.SelectFilter("For you");
+        Check.Until(() => Text(view).Contains("Star Song"), "cancelled refresh and tab return keep a usable page");
         window.Close();
     }
 

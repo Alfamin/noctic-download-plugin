@@ -3,6 +3,17 @@
 Finds songs and imports Spotify/Deezer playlists through Music Hunters and DeezLoad using
 your own Telegram account, from inside [Noctis](https://github.com/heartached/Noctis).
 
+Version **2.11.0** makes **For you** faster and keeps your last successful picks between sessions.
+Optionally paste your own **Last.fm API key** in Finder settings for better similar artists. Last.fm is tried first;
+ListenBrainz/MusicBrainz and Deezer remain backups. Seed relations run three at a time; related artists' songs need
+one catalog request instead of two. Your own artists still use local album evidence to distinguish namesakes.
+Saved picks appear immediately; stale picks refresh in the background. **New picks ready** lets you choose when to
+show the replacement, so rows never jump under your pointer. **Refresh** keeps the previous list usable.
+Metadata follows Finder's existing proxy setting; no audio downloads automatically. Only artist names go to Last.fm;
+the other catalog fallbacks may also receive song titles. The key stays in your Noctis setting (plain text), never
+in the public DLL/ZIP, caches, or diagnostic messages. Blank key preserves the existing account-free fallback.
+See [technical notes and validation](docs/LASTFM-2.11.0.md).
+
 Version **2.10.1** fixes For you's **Download now** and **Queue download**, which did nothing after you had visited another tab, and the chosen filter (All, Artists…) now keeps its colour while the pointer is still on it.
 
 Version **2.10.0** adds **For you**. Before you search, the Search tab shows songs you don't have yet, picked from the

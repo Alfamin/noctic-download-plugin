@@ -20,6 +20,8 @@ internal sealed class DiscoveryView : UserControl, IDisposable
     private DiscoverResult? _forYou;
     private Dictionary<string, string> _because = new();
     private bool _forYouStarted;
+    private bool _newPicksReady;
+    private Button? _forYouRefresh;
     private readonly TextBlock _status = FinderTheme.Caption("Search artists, songs and albums above. Browsing does not need Telegram.");
     private readonly StackPanel _results = new() { Spacing = 8 };
     private readonly ScrollViewer _scroll = new();
@@ -64,6 +66,7 @@ internal sealed class DiscoveryView : UserControl, IDisposable
         _results.Children.Add(welcome);
         if (forYou is not null)
         {
+            forYou.PicksReady += OnPicksReady;
             // Before any search, show what the listener does not have yet. Loading starts once the page is on screen.
             _filter = "For you";
             AttachedToVisualTree += (_, _) => { if (!_forYouStarted && _filter == "For you" && _query.Length == 0) LoadForYou(false); };
@@ -91,37 +94,68 @@ internal sealed class DiscoveryView : UserControl, IDisposable
             return;
         }
         _search?.Cancel(); _search?.Dispose(); var source = _search = new CancellationTokenSource();
-        ClearCards(); _results.Children.Clear(); _scroll.Offset = default; _loading.IsVisible = true;
-        _status.Text = "Learning your taste…";
+        if (_forYou is null) { ClearCards(); _results.Children.Clear(); _scroll.Offset = default; }
+        _loading.IsVisible = true;
+        _status.Text = _forYou is null ? "Learning your taste…" : "Refreshing your picks…";
         bool Current() => !_disposed && ReferenceEquals(source, _search);
         var progress = new Progress<string>(text => { if (Current() && ForYouMode) _status.Text = text; });
         try
         {
+            if (!refresh && await _forYouSource.SavedAsync(source.Token) is { } saved)
+            {
+                if (!Current()) return;
+                ShowForYou(saved);
+                await MatchForYou();
+                _forYouSource.WarmUp(TimeSpan.Zero);
+                return;
+            }
             var result = await _forYouSource.BuildAsync(refresh, progress, source.Token);
             if (!Current()) return;
-            _forYou = result;
-            _because = result.Songs.GroupBy(s => s.Track.Song.Id).ToDictionary(g => g.Key, g => g.First().Because);
-            _status.Text = result.Notice.Length > 0 ? result.Notice
-                : $"{result.Songs.Count} songs you don't have yet, picked from the artists you play. Nothing downloads until you choose.";
-            if (ForYouMode) Render();
-            if (_actions is not null && result.Songs.Count > 0)
+            if (_forYou is not null && result.Songs.Count == 0 && result.Notice.Length > 0)
+                _status.Text = "Keeping your previous picks. " + result.Notice;
+            else ShowForYou(result);
+            await MatchForYou();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { if (Current() && ForYouMode) _status.Text = "For you: " + ArtistCatalog.Explain(ex); }
+        finally { if (Current()) _loading.IsVisible = false; }
+
+        async Task MatchForYou()
+        {
+            if (!Current() || !ForYouMode) return;
+            var result = _forYou;
+            if (_actions is not null && result is { Songs.Count: > 0 })
             {
                 _matches = await _actions.MatchAsync(CurrentSongs().Select(s => s.Song), source.Token);
                 if (Current()) RefreshSongs();
             }
         }
-        catch (OperationCanceledException) { }
-        catch (Exception ex) { if (Current() && ForYouMode) _status.Text = "For you: " + ArtistCatalog.Explain(ex); }
-        finally { if (Current()) _loading.IsVisible = false; }
     }
+
+    private void ShowForYou(DiscoverResult result)
+    {
+        if (_forYou is not null && !result.Songs.Select(s => s.Track.Song.Id).SequenceEqual(_forYou.Songs.Select(s => s.Track.Song.Id))) ClearCards();
+        _forYou = result; _newPicksReady = false;
+        _because = result.Songs.GroupBy(s => s.Track.Song.Id).ToDictionary(g => g.Key, g => g.First().Because);
+        _status.Text = result.Notice.Length > 0 ? result.Notice
+            : $"{result.Songs.Count} songs you don't have yet, picked from the artists you play. Nothing downloads until you choose.";
+        if (ForYouMode) Render();
+    }
+
+    private void OnPicksReady(DiscoverResult result) => Dispatcher.UIThread.Post(() =>
+    {
+        if (_disposed || _forYou is null || result.Songs.Count == 0 || result.Songs.Select(s => s.Track.Song.Id).SequenceEqual(_forYou.Songs.Select(s => s.Track.Song.Id))) return;
+        _newPicksReady = true;
+        if (_forYouRefresh is not null) _forYouRefresh.Content = "New picks ready";
+    });
 
     private void RenderForYou()
     {
         var header = new Grid { ColumnDefinitions = new("*,Auto"), Margin = new Thickness(0, 18, 0, 5) };
         header.Children.Add(new TextBlock { Text = "Songs for you", FontSize = 20, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center });
-        var refresh = new Button { Content = "Refresh", FontSize = 12 }; refresh.Classes.Add("finder-quiet");
+        var refresh = _forYouRefresh = new Button { Content = _newPicksReady ? "New picks ready" : "Refresh", FontSize = 12 }; refresh.Classes.Add("finder-quiet");
         ToolTip.SetTip(refresh, "Pick again from what you have played since, without the songs you downloaded or dismissed.");
-        refresh.Click += (_, _) => LoadForYou(true);
+        refresh.Click += (_, _) => { if (_newPicksReady) { _forYou = null; LoadForYou(false); } else LoadForYou(true); };
         Grid.SetColumn(refresh, 1); header.Children.Add(refresh); _results.Children.Add(header);
         if (_forYou is not { } forYou) return;
         foreach (var song in forYou.Songs)
@@ -131,6 +165,17 @@ internal sealed class DiscoveryView : UserControl, IDisposable
             Heading("Artists for you");
             Shelf(forYou.Artists.Select(a => new FinderHit("Artists", a.Artist.Id, a.Artist.Name, a.Because, 0, Artist: a.Artist)));
         }
+        if (_forYou?.LastFm == true || _forYouSource?.UsesLastFm == true)
+        {
+            var credit = new Button { Content = "Artist suggestions · Last.fm ↗", FontSize = 11, Margin = new Thickness(0, 10, 0, 0) };
+            credit.Classes.Add("finder-quiet"); credit.Click += (_, _) => OpenLastFm("https://www.last.fm/"); _results.Children.Add(credit);
+        }
+    }
+
+    private void OpenLastFm(string url)
+    {
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
+        catch (Exception) { _status.Text = "Could not open the browser. Visit Last.fm to explore this artist."; }
     }
 
     private void NotForMe(CatalogSearchSong track, Border card)
@@ -138,6 +183,7 @@ internal sealed class DiscoveryView : UserControl, IDisposable
         if (_forYouSource is null || _forYou is null) return;
         bool artistToo = _forYouSource.Hidden.Hide(track.Song);
         _forYouSource.Forget();
+        _newPicksReady = false; if (_forYouRefresh is not null) _forYouRefresh.Content = "Refresh";
         var leaving = artistToo && track.Song.Artists.FirstOrDefault() is { } artist ? artist.Id : null;
         _forYou = _forYou with { Songs = _forYou.Songs.Where(s => s.Track.Song.Id != track.Song.Id && (leaving is null || s.Track.Song.Artists.FirstOrDefault()?.Id != leaving)).ToList() };
         if (card.Parent is Panel parent) parent.Children.Remove(card);
@@ -147,6 +193,7 @@ internal sealed class DiscoveryView : UserControl, IDisposable
     public void SelectFilter(string filter)
     {
         if (_disposed || !_filters.ContainsKey(filter) || _filter == filter) return;
+        if (ForYouMode && filter != "For you") { _search?.Cancel(); _loading.IsVisible = false; }
         _filter = filter; UpdateFilters(); _scroll.Offset = default;
         if (BotMode) { _search?.Cancel(); _loading.IsVisible = false; if (_query.Length > 0) BotSearchRequested?.Invoke(); }
         else if (ForYouMode) { CatalogSelected?.Invoke(); LoadForYou(false); }
@@ -349,6 +396,16 @@ internal sealed class DiscoveryView : UserControl, IDisposable
             _songLayouts.Add((row, buttons)); card.Child = row; card.Padding = new Thickness(8, 5); card.CornerRadius = new CornerRadius(7); card.Classes.Add("finder-song");
         }
         ToolTip.SetTip(card, hit.Subtitle); _cards[key] = (card, picture, hit, subtitle); target.Children.Add(card);
+        if (ForYouMode && (_forYou?.LastFm == true || _forYouSource?.UsesLastFm == true))
+        {
+            var artistName = hit.Artist?.Name ?? hit.Track?.Song.Artists.FirstOrDefault()?.Name;
+            if (artistName is not null)
+            {
+                var link = new MenuItem { Header = "View artist on Last.fm ↗" };
+                link.Click += (_, _) => OpenLastFm("https://www.last.fm/music/" + Uri.EscapeDataString(artistName));
+                card.ContextMenu = new ContextMenu { ItemsSource = new[] { link } };
+            }
+        }
     }
     private async Task Open(FinderHit hit, Button button)
     {
@@ -438,5 +495,5 @@ internal sealed class DiscoveryView : UserControl, IDisposable
                 picture.Load(_catalog(), hit.Artist ?? hit.Album?.Artist ?? hit.Track!.Song.Artists[0], _search.Token);
     }
     private void ClearCards() { foreach (var (_, item) in _cards) item.Picture.Dispose(); _cards.Clear(); _songButtons.Clear(); _songLayouts.Clear(); }
-    public void Dispose() { if (_disposed) return; _disposed = true; _search?.Cancel(); _search?.Dispose(); _search = null; ClearCards(); if (_actions is not null) _actions.Downloads.Changed -= DownloadChanged; }
+    public void Dispose() { if (_disposed) return; _disposed = true; _search?.Cancel(); _search?.Dispose(); _search = null; ClearCards(); if (_actions is not null) _actions.Downloads.Changed -= DownloadChanged; if (_forYouSource is not null) _forYouSource.PicksReady -= OnPicksReady; }
 }

@@ -323,7 +323,7 @@ internal sealed partial class ArtistCatalog : IDisposable
         return (parts[0], parts[1]);
     }
     private static InvalidDataException Invalid(string message) => new("CATALOG_INCOMPLETE: " + message);
-    private static bool Recoverable(Exception ex) => ex is HttpRequestException or IOException or TimeoutException or SourcesWaitingException or JsonException;
+    private static bool Recoverable(Exception ex) => ex is HttpRequestException or IOException or InvalidDataException or TimeoutException or SourcesWaitingException or JsonException;
     internal static string Explain(Exception ex) => ex is SourcesWaitingException wait ? wait.Message + " Retry after " + wait.Until.ToLocalTime().ToString("g") + "." : ex.Message;
     private static string Text(JsonElement value, string key) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out var item) && item.ValueKind == JsonValueKind.String ? Clean(item.GetString() ?? "") : "";
     private static string Clean(string value) => new(value.Where(c => !char.IsControl(c)).Take(1000).ToArray());

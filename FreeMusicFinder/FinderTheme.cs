@@ -35,6 +35,11 @@ internal static class FinderTheme
         // pointer left it: the chosen one keeps its colour under the pointer too.
         foreach (var state in new[] { ":pointerover", ":pressed" })
         {
+            // Keep both layers consistent when a host theme adds button state styles.
+            var heldButton = new Style(s => s.OfType<Button>().Class("finder-primary").Class(state));
+            heldButton.Setters.Add(new Setter(TemplatedControl.BackgroundProperty, Resource("FinderAccent")));
+            heldButton.Setters.Add(new Setter(TemplatedControl.ForegroundProperty, Brushes.White));
+            window.Styles.Add(heldButton);
             var held = new Style(s => s.OfType<Button>().Class("finder-primary").Class(state).Template().OfType<Avalonia.Controls.Presenters.ContentPresenter>().Name("PART_ContentPresenter"));
             held.Setters.Add(new Setter(Avalonia.Controls.Presenters.ContentPresenter.BackgroundProperty, Resource("FinderAccent")));
             held.Setters.Add(new Setter(Avalonia.Controls.Presenters.ContentPresenter.ForegroundProperty, Brushes.White));

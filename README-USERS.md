@@ -9,6 +9,19 @@ You need: Noctis 1.5.3 or newer, a Telegram account, and the file
 
 ## 1. Install the zip
 
+**New in 2.11.0: faster For you.** Your last successful picks appear when you reopen Finder.
+Older picks refresh quietly; click **New picks ready** to show them when you want. **Refresh** keeps the current
+list visible, and downloads still need your own click. The first uncached visit still needs the music catalogs.
+
+For better similar artists, open **Settings → Plugins → Free Music Finder → Last.fm API key**.
+Create a free [Last.fm API key](https://www.last.fm/api/account/create) (any application name, callback empty),
+then paste the 32-character **API key**, not the secret. Return to **For you → Refresh** to use it immediately.
+Your key is optional and stored by Noctis as plain text.
+Only artist names go to Last.fm; no Last.fm login/scrobbling is needed. If it fails, Finder uses the other catalogs
+and explains key/rate-limit errors. Those fallbacks may also receive song titles. Everything uses your Finder/system
+proxy. Nothing is sent to Telegram until you choose a download. You can leave the key blank to keep using For you
+without an account. Right-click a recommendation for its artist's Last.fm page.
+
 **2.10.1** fixes For you's **Download now** and **Queue download**, which did nothing after you had visited another tab, and the chosen filter (All, Artists…) now keeps its colour while the pointer is still on it.
 
 **New in 2.10.0: For you.** Before you search, the Search tab shows songs you don't have yet, picked from the
